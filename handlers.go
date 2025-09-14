@@ -200,7 +200,76 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
     <meta charset="utf-8">  
 </head>  
 <body>  
-    <h1>播客  
+    <h1>播客 RSS 代理服务器</h1>  
+    <p>这是一个播客 RSS 代理服务器，用于代理播客内容。</p>  
+    <h2>使用方法</h2>  
+    <p>访问 <code>/feed?url=&lt;RSS_URL&gt;&amp;apikey=&lt;API_KEY&gt;</code> 来获取代理后的 RSS feed。</p>  
+    <p>访问 <code>/proxy?url=&lt;MEDIA_URL&gt;&amp;apikey=&lt;API_KEY&gt;</code> 来代理媒体文件。</p>  
+</body>  
+</html>`  
+      
+    fmt.Fprint(w, html)  
+}  
   
-Wiki pages you might want to explore:  
-- [System Architecture (aaro-n/podcast-proxy)](/wiki/aaro-n/podcast-proxy#1.1)
+// --- 辅助函数 (Helpers) ---  
+  
+func getBaseURL(r *http.Request) string {  
+    scheme := "http"  
+    if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {  
+        scheme = "https"  
+    }  
+    return fmt.Sprintf("%s://%s", scheme, r.Host)  
+}  
+  
+func createProxyURL(baseURL, targetURL, apiKey string) string {  
+    if targetURL == "" {  
+        return ""  
+    }  
+    proxyURL, _ := url.Parse(baseURL + "/proxy")  
+    params := url.Values{}  
+    params.Set("url", targetURL)  
+    params.Set("apikey", apiKey)  
+    proxyURL.RawQuery = params.Encode()  
+    return proxyURL.String()  
+}  
+  
+func isValidURL(urlStr string) bool {  
+    if urlStr == "" {  
+        return false  
+    }  
+      
+    parsedURL, err := url.Parse(urlStr)  
+    if err != nil {  
+        return false  
+    }  
+      
+    // 检查协议  
+    if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {  
+        return false  
+    }  
+      
+    // 检查主机名  
+    if parsedURL.Host == "" {  
+        return false  
+    }  
+      
+    // 防止本地地址访问 (SSRF 防护)  
+    if strings.Contains(parsedURL.Host, "localhost") ||   
+       strings.Contains(parsedURL.Host, "127.0.0.1") ||  
+       strings.Contains(parsedURL.Host, "::1") {  
+        return false  
+    }  
+      
+    return true  
+}  
+  
+func getUserAPIKey(r *http.Request) string {  
+    // 优先从 Authorization header 获取  
+    authHeader := r.Header.Get("Authorization")  
+    if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {  
+        return strings.TrimPrefix(authHeader, "Bearer ")  
+    }  
+      
+    // 回退到 URL 参数  
+    return r.URL.Query().Get("apikey")  
+}
