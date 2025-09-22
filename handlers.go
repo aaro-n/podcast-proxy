@@ -80,6 +80,31 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
         return  
     }  
       
+    // === 新增：转发原始响应标头 ===
+    // 复制原始响应的标头，但跳过可能干扰的头部
+    for key, values := range resp.Header {
+        // 跳过这些头部，因为它们会在内容处理完成后自动设置
+        skipHeaders := map[string]bool{
+            "Content-Length":     true,
+            "Transfer-Encoding":  true,
+            "Content-Encoding":   true,
+            "Connection":         true,
+            "Keep-Alive":         true,
+            "Proxy-Authenticate": true,
+            "Proxy-Authorization": true,
+            "TE":                true,
+            "Trailers":          true,
+            "Upgrade":           true,
+        }
+        
+        if !skipHeaders[key] {
+            for _, value := range values {
+                w.Header().Add(key, value)
+            }
+        }
+    }
+    // === 标头转发结束 ===
+    
     body, err := io.ReadAll(resp.Body)  
     if err != nil {  
         log.Printf("Failed to read feed body: %v", err)  
@@ -126,6 +151,7 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
     // 缓存结果  
     cache.Set(cacheKey, fullXML, config.CacheExpiration)  
       
+    // 确保设置正确的Content-Type（可能会覆盖从原始响应复制的）
     w.Header().Set("Content-Type", "application/xml; charset=utf-8")  
     w.Write(fullXML)  
 }  
