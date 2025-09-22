@@ -3,6 +3,7 @@ package main
   
 import (  
     "crypto/sha256"  
+    "encoding/base64"  
     "encoding/xml"  
     "fmt"  
     "io"  
@@ -15,7 +16,6 @@ import (
   
 func feedHandler(w http.ResponseWriter, r *http.Request) {  
     originalFeedURL := r.URL.Query().Get("url")  
-    userAPIKey := getUserAPIKey(r)  
       
     if originalFeedURL == "" {  
         http.Error(w, "Missing 'url' query parameter", http.StatusBadRequest)  
@@ -119,22 +119,24 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
         return  
     }  
       
-    // URL 重写  
+    // 获取认证信息并URL重写  
+    authType, authInfo := getAuthInfo(r)  
     baseURL := getBaseURL(r)  
+      
     if feed.Channel.Image.URL != "" {  
-        feed.Channel.Image.URL = createProxyURL(baseURL, feed.Channel.Image.URL, userAPIKey)  
+        feed.Channel.Image.URL = createProxyURL(baseURL, feed.Channel.Image.URL, authType, authInfo)  
     }  
     if feed.Channel.ITunesImage.Href != "" {  
-        feed.Channel.ITunesImage.Href = createProxyURL(baseURL, feed.Channel.ITunesImage.Href, userAPIKey)  
+        feed.Channel.ITunesImage.Href = createProxyURL(baseURL, feed.Channel.ITunesImage.Href, authType, authInfo)  
     }  
       
     for i := range feed.Channel.Items {  
         item := &feed.Channel.Items[i]  
         if item.Enclosure.URL != "" {  
-            item.Enclosure.URL = createProxyURL(baseURL, item.Enclosure.URL, userAPIKey)  
+            item.Enclosure.URL = createProxyURL(baseURL, item.Enclosure.URL, authType, authInfo)  
         }  
         if item.ITunesImage.Href != "" {  
-            item.ITunesImage.Href = createProxyURL(baseURL, item.ITunesImage.Href, userAPIKey)  
+            item.ITunesImage.Href = createProxyURL(baseURL, item.ITunesImage.Href, authType, authInfo)  
         }  
     }  
       
@@ -229,8 +231,13 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
     <h1>播客 RSS 代理服务器</h1>  
     <p>这是一个播客 RSS 代理服务器，用于代理播客内容。</p>  
     <h2>使用方法</h2>  
+    <h3>API Key 认证（优先）</h3>  
     <p>访问 <code>/feed?url=&lt;RSS_URL&gt;&amp;apikey=&lt;API_KEY&gt;</code> 来获取代理后的 RSS feed。</p>  
     <p>访问 <code>/proxy?url=&lt;MEDIA_URL&gt;&amp;apikey=&lt;API_KEY&gt;</code> 来代理媒体文件。</p>  
+    <h3>用户认证</h3>  
+    <p>访问 <code>/feed?url=&lt;RSS_URL&gt;&amp;username=&lt;USERNAME&gt;&amp;password=&lt;PASSWORD&gt;</code></p>  
+    <p>或者使用 HTTP Basic Authentication：</p>  
+    <p><code>curl -u username:password "http://localhost:8080/feed?url=&lt;RSS_URL&gt;"</code></p>  
 </body>  
 </html>`  
       
@@ -239,24 +246,82 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
   
 // --- 辅助函数 (Helpers) ---  
   
+// 获取当前认证类型和认证信息  
+func getAuthInfo(r *http.Request) (authType string, authInfo string) {  
+    // 首先检查API Key认证  
+    var userAPIKey string  
+    authHeader := r.Header.Get("Authorization")  
+    if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {  
+        userAPIKey = strings.TrimPrefix(authHeader, "Bearer ")  
+    } else {  
+        userAPIKey = r.URL.Query().Get("apikey")  
+    }  
+      
+    if userAPIKey != "" {  
+        return "apikey", userAPIKey  
+    }  
+      
+    // 然后检查用户认证  
+    var username, password string  
+      
+    // 尝试从 Authorization header 获取 Basic Auth  
+    if authHeader != "" && strings.HasPrefix(authHeader, "Basic ") {  
+        encoded := strings.TrimPrefix(authHeader, "Basic ")  
+        if decoded, err := base64.StdEncoding.DecodeString(encoded); err == nil {  
+            creds := strings.SplitN(string(decoded), ":", 2)  
+            if len(creds) == 2 {  
+                username = creds[0]  
+                password = creds[1]  
+            }  
+        }  
+    }  
+      
+    // 如果没有从 header 获取到，尝试从 URL 参数获取  
+    if username == "" {  
+        username = r.URL.Query().Get("username")  
+        password = r.URL.Query().Get("password")  
+    }  
+      
+    if username != "" && password != "" {  
+        return "userpass", fmt.Sprintf("%s:%s", username, password)  
+    }  
+      
+    return "", ""  
+}  
+  
+// 修改 createProxyURL 函数以支持不同的认证方式  
+func createProxyURL(baseURL, targetURL string, authType string, authInfo string) string {  
+    if targetURL == "" {  
+        return ""  
+    }  
+      
+    proxyURL, _ := url.Parse(baseURL + "/proxy")  
+    params := url.Values{}  
+    params.Set("url", targetURL)  
+      
+    // 根据认证类型添加相应的认证参数  
+    switch authType {  
+    case "apikey":  
+        params.Set("apikey", authInfo)  
+    case "userpass":  
+        // 将用户名和密码分开存储  
+        creds := strings.SplitN(authInfo, ":", 2)  
+        if len(creds) == 2 {  
+            params.Set("username", creds[0])  
+            params.Set("password", creds[1])  
+        }  
+    }  
+      
+    proxyURL.RawQuery = params.Encode()  
+    return proxyURL.String()  
+}  
+  
 func getBaseURL(r *http.Request) string {  
     scheme := "http"  
     if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {  
         scheme = "https"  
     }  
     return fmt.Sprintf("%s://%s", scheme, r.Host)  
-}  
-  
-func createProxyURL(baseURL, targetURL, apiKey string) string {  
-    if targetURL == "" {  
-        return ""  
-    }  
-    proxyURL, _ := url.Parse(baseURL + "/proxy")  
-    params := url.Values{}  
-    params.Set("url", targetURL)  
-    params.Set("apikey", apiKey)  
-    proxyURL.RawQuery = params.Encode()  
-    return proxyURL.String()  
 }  
   
 func isValidURL(urlStr string) bool {  

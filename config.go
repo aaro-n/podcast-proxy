@@ -9,6 +9,8 @@ import (
   
 type Config struct {  
     APIKey           string  
+    Username         string  
+    Password         string  
     Port             string  
     CacheExpiration  time.Duration  
     MaxRetries       int  
@@ -22,6 +24,9 @@ func LoadConfig() *Config {
         log.Fatal("FATAL: API_KEY environment variable is not set.")  
     }  
   
+    username := os.Getenv("USERNAME")  
+    password := os.Getenv("PASSWORD")  
+  
     port := os.Getenv("PORT")  
     if port == "" {  
         port = "8080"  
@@ -29,6 +34,8 @@ func LoadConfig() *Config {
   
     return &Config{  
         APIKey:          apiKey,  
+        Username:        username,  
+        Password:        password,  
         Port:            port,  
         CacheExpiration: 10 * time.Minute,  
         MaxRetries:      3,  
