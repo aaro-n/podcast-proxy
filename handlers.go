@@ -5,7 +5,6 @@ import (
     "compress/gzip"
     "crypto/sha256"
     "encoding/base64"
-    "encoding/xml"
     "fmt"
     "io"
     "log"
