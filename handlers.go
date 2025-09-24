@@ -151,34 +151,26 @@ func processRSSFeed(originalXML []byte, baseURL, authType, authInfo string) ([]b
         
         switch t := token.(type) {
         case xml.StartElement:
-            // 检查是否是需要替换URL的标签
-            if shouldReplaceURL(t) {
-                // 读取内容并替换URL
-                var content string
-                if err := decoder.DecodeElement(&content, &t); err != nil {
-                    return nil, fmt.Errorf("failed to decode element: %v", err)
-                }
-                
-                // 只替换非空URL
-                if strings.TrimSpace(content) != "" {
-                    newURL := createProxyURL(baseURL, content, authType, authInfo)
-                    // 修复：传递 t 而不是 &t
-                    if err := encoder.EncodeElement(newURL, t); err != nil {
-                        return nil, fmt.Errorf("failed to encode element: %v", err)
-                    }
-                } else {
-                    // 如果内容为空，原样写入
-                    // 修复：传递 &t 而不是 t
-                    if err := encoder.EncodeElement(content, t); err != nil {
-                        return nil, fmt.Errorf("failed to encode empty element: %v", err)
-                    }
-                }
-                continue
-            }
+            // 检查标签名（忽略命名空间）
+            tagName := t.Name.Local
             
-            // 检查是否是包含URL属性的标签
-            if shouldReplaceAttributeURL(t) {
-                // 处理属性
+            // 处理带命名空间的标签
+            if tagName == "image" && t.Name.Space == "http://www.itunes.com/dtds/podcast-1.0.dtd" {
+                // 处理 itunes:image
+                for i, attr := range t.Attr {
+                    if attr.Name.Local == "href" && strings.TrimSpace(attr.Value) != "" {
+                        t.Attr[i].Value = createProxyURL(baseURL, attr.Value, authType, authInfo)
+                    }
+                }
+            } else if tagName == "content" && (t.Name.Space == "http://search.yahoo.com/mrss/" || strings.HasPrefix(t.Name.Space, "media")) {
+                // 处理 media:content
+                for i, attr := range t.Attr {
+                    if attr.Name.Local == "url" && strings.TrimSpace(attr.Value) != "" {
+                        t.Attr[i].Value = createProxyURL(baseURL, attr.Value, authType, authInfo)
+                    }
+                }
+            } else if shouldReplaceAttributeURL(t) {
+                // 处理其他需要替换属性URL的标签
                 modifiedElement := t
                 for i, attr := range modifiedElement.Attr {
                     if shouldReplaceAttributeName(modifiedElement.Name.Local, attr.Name.Local) {
@@ -187,29 +179,27 @@ func processRSSFeed(originalXML []byte, baseURL, authType, authInfo string) ([]b
                         }
                     }
                 }
-                
-                // 读取子内容
-                var content interface{}
-                if err := decoder.DecodeElement(&content, &t); err != nil {
-                    return nil, fmt.Errorf("failed to decode element with attributes: %v", err)
-                }
-                
-                // 写入修改后的开始标签和内容
-                if err := encoder.EncodeElement(content, modifiedElement); err != nil {
-                    return nil, fmt.Errorf("failed to encode element with modified attributes: %v", err)
-                }
-                continue
+                t = modifiedElement
             }
             
+            // 读取子内容并编码
+            var content interface{}
+            if err := decoder.DecodeElement(&content, &t); err != nil {
+                return nil, fmt.Errorf("failed to decode element: %v", err)
+            }
+            
+            if err := encoder.EncodeElement(content, t); err != nil {
+                return nil, fmt.Errorf("failed to encode element: %v", err)
+            }
+            continue
+            
         case xml.EndElement:
-            // 正常处理结束标签
             if err := encoder.EncodeToken(t); err != nil {
                 return nil, fmt.Errorf("failed to encode end element: %v", err)
             }
             continue
             
         case xml.CharData:
-            // 正常处理文本内容
             if err := encoder.EncodeToken(t); err != nil {
                 return nil, fmt.Errorf("failed to encode char data: %v", err)
             }
@@ -272,6 +262,7 @@ func shouldReplaceAttributeURL(element xml.StartElement) bool {
     attrURLTags := map[string]bool{
         "enclosure": true,  // enclosure@url
         "image":     true,  // image@url (某些格式)
+        "content":   true,  // media:content@url (新增)
     }
     
     return attrURLTags[tagName]
@@ -281,7 +272,7 @@ func shouldReplaceAttributeURL(element xml.StartElement) bool {
 func shouldReplaceAttributeName(tagName, attrName string) bool {
     // 需要替换的属性名列表
     urlAttrs := map[string]bool{
-        "url":  true,  // enclosure@url, image@url
+        "url":  true,  // enclosure@url, image@url, media:content@url
         "href": true,  // itunes:image@href
     }
     
