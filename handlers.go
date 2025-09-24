@@ -2,15 +2,16 @@
 package main
  
 import (
+    "bytes"
     "compress/gzip"
     "crypto/sha256"
     "encoding/base64"
+    "encoding/xml"
     "fmt"
     "io"
     "log"
     "net/http"
     "net/url"
-    "regexp"
     "strings"
     "time"
 )
@@ -23,10 +24,8 @@ func min(a, b int) int {
     return b
 }
  
-// rewriteURLsInXML 在XML内容中重写URL
-func rewriteURLsInXML(xmlContent, baseURL, authType, authInfo string) string {
-    result := xmlContent
-    
+// rewriteURLsInStruct 在解析后的RSS结构体中重写URL
+func rewriteURLsInStruct(rss *RSS, baseURL, authType, authInfo string) {
     // 构建代理URL前缀
     proxyPrefix := baseURL + "/proxy?"
     if authType == "apikey" {
@@ -37,29 +36,36 @@ func rewriteURLsInXML(xmlContent, baseURL, authType, authInfo string) string {
             proxyPrefix += "username=" + creds[0] + "&password=" + creds[1] + "&url="
         }
     }
-    
-    // 使用正则表达式匹配并替换URL
-    // 1. 替换enclosure标签中的url属性
-    enclosurePattern := regexp.MustCompile(`(<enclosure\s+url=")([^"]+)`)
-    result = enclosurePattern.ReplaceAllString(result, `$1`+proxyPrefix+`$2`)
-    
-    // 2. 替换image标签中的url
-    imageURLPattern := regexp.MustCompile(`(<image>\s*<url>)([^<]+)`)
-    result = imageURLPattern.ReplaceAllString(result, `$1`+proxyPrefix+`$2`)
-    
-    // 3. 替换itunes:image标签中的href属性
-    itunesImagePattern := regexp.MustCompile(`(<itunes:image\s+href=")([^"]+)`)
-    result = itunesImagePattern.ReplaceAllString(result, `$1`+proxyPrefix+`$2`)
-    
-    // 4. 替换channel中的image url
-    channelImagePattern := regexp.MustCompile(`(<image>\s*<url>)([^<]+)`)
-    result = channelImagePattern.ReplaceAllString(result, `$1`+proxyPrefix+`$2`)
-    
-    // 5. 替换item中的image url
-    itemImagePattern := regexp.MustCompile(`(<item>.*?<image>\s*<url>)([^<]+)`)
-    result = itemImagePattern.ReplaceAllString(result, `$1`+proxyPrefix+`$2`)
-    
-    return result
+ 
+    // 修改Channel级别的图片URL
+    if rss.Channel.Image.URL != "" {
+        rss.Channel.Image.URL = proxyPrefix + rss.Channel.Image.URL
+    }
+ 
+    // 修改Channel级别的iTunes图片URL
+    if rss.Channel.ITunesImage.Href != "" {
+        rss.Channel.ITunesImage.Href = proxyPrefix + rss.Channel.ITunesImage.Href
+    }
+ 
+    // 修改每个Item中的URL
+    for i := range rss.Channel.Items {
+        item := &rss.Channel.Items[i]
+        
+        // 修改音频文件URL
+        if item.Enclosure.URL != "" {
+            item.Enclosure.URL = proxyPrefix + item.Enclosure.URL
+        }
+        
+        // 修改Item级别的图片URL
+        if item.Image.URL != "" {
+            item.Image.URL = proxyPrefix + item.Image.URL
+        }
+        
+        // 修改Item级别的iTunes图片URL
+        if item.ITunesImage.Href != "" {
+            item.ITunesImage.Href = proxyPrefix + item.ITunesImage.Href
+        }
+    }
 }
  
 func feedHandler(w http.ResponseWriter, r *http.Request) {
@@ -206,21 +212,83 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
     
+    // 使用XML解析器解析RSS
+    var rss RSS
+    decoder := xml.NewDecoder(bytes.NewReader(body))
+    
+    // 设置更宽松的解析选项
+    decoder.Strict = false
+    decoder.AutoClose = xml.HTMLAutoClose
+    decoder.Entity = xml.HTMLEntity
+    
+    err = decoder.Decode(&rss)
+    if err != nil {
+        log.Printf("Failed to parse RSS XML: %v", err)
+        // 如果XML解析失败，尝试清理XML后再次解析
+        cleanedBody := cleanXML(string(body))
+        decoder = xml.NewDecoder(strings.NewReader(cleanedBody))
+        decoder.Strict = false
+        decoder.AutoClose = xml.HTMLAutoClose
+        decoder.Entity = xml.HTMLEntity
+        
+        err = decoder.Decode(&rss)
+        if err != nil {
+            log.Printf("Failed to parse cleaned RSS XML: %v", err)
+            http.Error(w, fmt.Sprintf("Failed to parse RSS feed: %v", err), http.StatusInternalServerError)
+            return
+        }
+    }
+    
     // 获取认证信息
     authType, authInfo := getAuthInfo(r)
     baseURL := getBaseURL(r)
     
-    // 使用字符串替换重写URL，保持原始XML结构
-    modifiedContent := rewriteURLsInXML(string(body), baseURL, authType, authInfo)
+    // 在结构体中重写URL
+    rewriteURLsInStruct(&rss, baseURL, authType, authInfo)
     
-    log.Printf("URL rewriting completed. Modified content length: %d bytes", len(modifiedContent))
+    // 将修改后的结构体序列化为XML
+    modifiedContent, err := xml.Marshal(&rss)
+    if err != nil {
+        log.Printf("Failed to marshal RSS to XML: %v", err)
+        http.Error(w, fmt.Sprintf("Failed to generate RSS XML: %v", err), http.StatusInternalServerError)
+        return
+    }
+    
+    // 添加XML声明和换行
+    var xmlBuilder strings.Builder
+    xmlBuilder.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
+    xmlBuilder.Write(modifiedContent)
+    
+    finalContent := xmlBuilder.String()
+    
+    log.Printf("URL rewriting completed. Modified content length: %d bytes", len(finalContent))
     
     // 缓存结果
-    cache.Set(cacheKey, []byte(modifiedContent), config.CacheExpiration)
+    cache.Set(cacheKey, []byte(finalContent), config.CacheExpiration)
     
     // 确保设置正确的Content-Type（可能会覆盖从原始响应复制的）
     w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-    w.Write([]byte(modifiedContent))
+    w.Write([]byte(finalContent))
+}
+ 
+// cleanXML 清理XML中的常见问题
+func cleanXML(xmlContent string) string {
+    result := xmlContent
+    
+    // 修复常见的实体引用问题
+    replacements := map[string]string{
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&apos;",
+    }
+    
+    for old, new := range replacements {
+        result = strings.ReplaceAll(result, old, new)
+    }
+    
+    return result
 }
  
 func proxyHandler(w http.ResponseWriter, r *http.Request) {
