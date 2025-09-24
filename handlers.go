@@ -162,12 +162,14 @@ func processRSSFeed(originalXML []byte, baseURL, authType, authInfo string) ([]b
                 // 只替换非空URL
                 if strings.TrimSpace(content) != "" {
                     newURL := createProxyURL(baseURL, content, authType, authInfo)
+                    // 修复：传递 t 而不是 &t
                     if err := encoder.EncodeElement(newURL, t); err != nil {
                         return nil, fmt.Errorf("failed to encode element: %v", err)
                     }
                 } else {
                     // 如果内容为空，原样写入
-                    if err := encoder.EncodeElement(content, &t); err != nil {
+                    // 修复：传递 &t 而不是 t
+                    if err := encoder.EncodeElement(content, t); err != nil {
                         return nil, fmt.Errorf("failed to encode empty element: %v", err)
                     }
                 }
@@ -176,16 +178,12 @@ func processRSSFeed(originalXML []byte, baseURL, authType, authInfo string) ([]b
             
             // 检查是否是包含URL属性的标签
             if shouldReplaceAttributeURL(t) {
-                // 复制开始标签
-                if err := encoder.EncodeToken(t); err != nil {
-                    return nil, fmt.Errorf("failed to encode start element: %v", err)
-                }
-                
                 // 处理属性
-                for i, attr := range t.Attr {
-                    if shouldReplaceAttributeName(t.Name.Local, attr.Name.Local) {
+                modifiedElement := t
+                for i, attr := range modifiedElement.Attr {
+                    if shouldReplaceAttributeName(modifiedElement.Name.Local, attr.Name.Local) {
                         if strings.TrimSpace(attr.Value) != "" {
-                            t.Attr[i].Value = createProxyURL(baseURL, attr.Value, authType, authInfo)
+                            modifiedElement.Attr[i].Value = createProxyURL(baseURL, attr.Value, authType, authInfo)
                         }
                     }
                 }
@@ -197,7 +195,7 @@ func processRSSFeed(originalXML []byte, baseURL, authType, authInfo string) ([]b
                 }
                 
                 // 写入修改后的开始标签和内容
-                if err := encoder.EncodeElement(content, t); err != nil {
+                if err := encoder.EncodeElement(content, modifiedElement); err != nil {
                     return nil, fmt.Errorf("failed to encode element with modified attributes: %v", err)
                 }
                 continue
@@ -290,7 +288,6 @@ func shouldReplaceAttributeName(tagName, attrName string) bool {
     return urlAttrs[attrName]
 }
  
-// proxyHandler 保持不变
 func proxyHandler(w http.ResponseWriter, r *http.Request) {
     targetURL := r.URL.Query().Get("url")
     if targetURL == "" {
@@ -346,7 +343,6 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
     }
 }
  
-// indexHandler 保持不变
 func indexHandler(w http.ResponseWriter, r *http.Request) {
     if r.URL.Path != "/" {
         http.NotFound(w, r)
@@ -378,7 +374,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
     fmt.Fprint(w, html)
 }
  
-// --- 辅助函数 (Helpers) 保持不变 ---
+// --- 辅助函数 (Helpers) ---
  
 // 获取当前认证类型和认证信息
 func getAuthInfo(r *http.Request) (authType string, authInfo string) {
@@ -423,7 +419,7 @@ func getAuthInfo(r *http.Request) (authType string, authInfo string) {
     return "", ""
 }
  
-// 修改 createProxyURL 函数以支持不同的认证方式
+// createProxyURL 创建代理URL
 func createProxyURL(baseURL, targetURL string, authType string, authInfo string) string {
     if targetURL == "" {
         return ""
