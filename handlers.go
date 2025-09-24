@@ -3,7 +3,6 @@ package main
  
 import (
     "bytes"
-    "compress/gzip"
     "crypto/sha256"
     "encoding/base64"
     "encoding/xml"
@@ -15,58 +14,6 @@ import (
     "strings"
     "time"
 )
- 
-// min 辅助函数，用于获取两个整数中的较小值
-func min(a, b int) int {
-    if a < b {
-        return a
-    }
-    return b
-}
- 
-// rewriteURLsInStruct 在解析后的RSS结构体中重写URL
-func rewriteURLsInStruct(rss *RSS, baseURL, authType, authInfo string) {
-    // 构建代理URL前缀
-    proxyPrefix := baseURL + "/proxy?"
-    if authType == "apikey" {
-        proxyPrefix += "apikey=" + authInfo + "&url="
-    } else if authType == "userpass" {
-        creds := strings.SplitN(authInfo, ":", 2)
-        if len(creds) == 2 {
-            proxyPrefix += "username=" + creds[0] + "&password=" + creds[1] + "&url="
-        }
-    }
- 
-    // 修改Channel级别的图片URL
-    if rss.Channel.Image.URL != "" {
-        rss.Channel.Image.URL = proxyPrefix + rss.Channel.Image.URL
-    }
- 
-    // 修改Channel级别的iTunes图片URL
-    if rss.Channel.ITunesImage.Href != "" {
-        rss.Channel.ITunesImage.Href = proxyPrefix + rss.Channel.ITunesImage.Href
-    }
- 
-    // 修改每个Item中的URL
-    for i := range rss.Channel.Items {
-        item := &rss.Channel.Items[i]
-        
-        // 修改音频文件URL
-        if item.Enclosure.URL != "" {
-            item.Enclosure.URL = proxyPrefix + item.Enclosure.URL
-        }
-        
-        // 修改Item级别的图片URL
-        if item.Image.URL != "" {
-            item.Image.URL = proxyPrefix + item.Image.URL
-        }
-        
-        // 修改Item级别的iTunes图片URL
-        if item.ITunesImage.Href != "" {
-            item.ITunesImage.Href = proxyPrefix + item.ITunesImage.Href
-        }
-    }
-}
  
 func feedHandler(w http.ResponseWriter, r *http.Request) {
     originalFeedURL := r.URL.Query().Get("url")
@@ -109,28 +56,14 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
             return
         }
         
-        // 设置更完整的请求头
         req.Header.Set("User-Agent", "podcast-proxy/1.0")
-        req.Header.Set("Accept", "application/rss+xml, application/xml, text/xml, */*")
-        req.Header.Set("Accept-Encoding", "gzip, deflate")
-        req.Header.Set("Cache-Control", "no-cache")
         
         resp, err = httpClient.Do(req)
         if err == nil && resp.StatusCode == http.StatusOK {
-            // 检查内容类型
-            contentType := resp.Header.Get("Content-Type")
-            log.Printf("Response Content-Type: %s", contentType)
-            
-            // 如果内容类型不是XML/RSS相关，记录警告但继续尝试解析
-            if !strings.Contains(strings.ToLower(contentType), "xml") && 
-               !strings.Contains(strings.ToLower(contentType), "rss") {
-                log.Printf("Warning: Unexpected Content-Type: %s for URL: %s", contentType, originalFeedURL)
-            }
             break
         }
         
         if resp != nil {
-            log.Printf("Request failed with status: %s", resp.Status)
             resp.Body.Close()
         }
     }
@@ -173,124 +106,191 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
     }
     // === 标头转发结束 ===
     
-    // 处理压缩内容
-    var reader io.Reader = resp.Body
-    contentEncoding := resp.Header.Get("Content-Encoding")
-    
-    if strings.Contains(strings.ToLower(contentEncoding), "gzip") {
-        log.Printf("Decompressing gzip content")
-        gzipReader, err := gzip.NewReader(resp.Body)
-        if err != nil {
-            log.Printf("Failed to create gzip reader: %v", err)
-            http.Error(w, fmt.Sprintf("Failed to decompress response: %v", err), http.StatusInternalServerError)
-            return
-        }
-        defer gzipReader.Close()
-        reader = gzipReader
-    }
-    
-    body, err := io.ReadAll(reader)
+    body, err := io.ReadAll(resp.Body)
     if err != nil {
         log.Printf("Failed to read feed body: %v", err)
         http.Error(w, fmt.Sprintf("Failed to read original feed body: %v", err), http.StatusInternalServerError)
         return
     }
     
-    // 添加调试日志 - 记录响应内容预览
-    bodyPreview := string(body)
-    if len(bodyPreview) > 500 {
-        bodyPreview = bodyPreview[:500]
-    }
-    log.Printf("Response body preview: %s", bodyPreview)
-    log.Printf("Response body length: %d bytes", len(body))
-    
-    // 检查是否为有效的XML内容
-    trimmedBody := strings.TrimSpace(string(body))
-    if !strings.HasPrefix(trimmedBody, "<") {
-        log.Printf("Error: Response does not start with XML tag. First 100 chars: %s", trimmedBody[:min(100, len(trimmedBody))])
-        http.Error(w, "Response is not valid XML content", http.StatusInternalServerError)
-        return
-    }
-    
-    // 使用XML解析器解析RSS
-    var rss RSS
-    decoder := xml.NewDecoder(bytes.NewReader(body))
-    
-    // 设置更宽松的解析选项
-    decoder.Strict = false
-    decoder.AutoClose = xml.HTMLAutoClose
-    decoder.Entity = xml.HTMLEntity
-    
-    err = decoder.Decode(&rss)
-    if err != nil {
-        log.Printf("Failed to parse RSS XML: %v", err)
-        // 如果XML解析失败，尝试清理XML后再次解析
-        cleanedBody := cleanXML(string(body))
-        decoder = xml.NewDecoder(strings.NewReader(cleanedBody))
-        decoder.Strict = false
-        decoder.AutoClose = xml.HTMLAutoClose
-        decoder.Entity = xml.HTMLEntity
-        
-        err = decoder.Decode(&rss)
-        if err != nil {
-            log.Printf("Failed to parse cleaned RSS XML: %v", err)
-            http.Error(w, fmt.Sprintf("Failed to parse RSS feed: %v", err), http.StatusInternalServerError)
-            return
-        }
-    }
-    
-    // 获取认证信息
+    // 获取认证信息并URL重写
     authType, authInfo := getAuthInfo(r)
     baseURL := getBaseURL(r)
     
-    // 在结构体中重写URL
-    rewriteURLsInStruct(&rss, baseURL, authType, authInfo)
-    
-    // 将修改后的结构体序列化为XML
-    modifiedContent, err := xml.Marshal(&rss)
+    // 使用新的XML处理方式，只替换URL，保持其他内容不变
+    processedXML, err := processRSSFeed(body, baseURL, authType, authInfo)
     if err != nil {
-        log.Printf("Failed to marshal RSS to XML: %v", err)
-        http.Error(w, fmt.Sprintf("Failed to generate RSS XML: %v", err), http.StatusInternalServerError)
+        log.Printf("Failed to process RSS feed: %v", err)
+        http.Error(w, fmt.Sprintf("Failed to process RSS feed: %v", err), http.StatusInternalServerError)
         return
     }
     
-    // 添加XML声明和换行
-    var xmlBuilder strings.Builder
-    xmlBuilder.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
-    xmlBuilder.Write(modifiedContent)
-    
-    finalContent := xmlBuilder.String()
-    
-    log.Printf("URL rewriting completed. Modified content length: %d bytes", len(finalContent))
-    
     // 缓存结果
-    cache.Set(cacheKey, []byte(finalContent), config.CacheExpiration)
+    cache.Set(cacheKey, processedXML, config.CacheExpiration)
     
     // 确保设置正确的Content-Type（可能会覆盖从原始响应复制的）
     w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-    w.Write([]byte(finalContent))
+    w.Write(processedXML)
 }
  
-// cleanXML 清理XML中的常见问题
-func cleanXML(xmlContent string) string {
-    result := xmlContent
+// processRSSFeed 处理RSS XML，只替换特定的URL，保持其他内容不变
+func processRSSFeed(originalXML []byte, baseURL, authType, authInfo string) ([]byte, error) {
+    decoder := xml.NewDecoder(bytes.NewReader(originalXML))
+    var buf bytes.Buffer
+    encoder := xml.NewEncoder(&buf)
+    encoder.Indent("", "  ") // 保持格式化
     
-    // 修复常见的实体引用问题
-    replacements := map[string]string{
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        "\"": "&quot;",
-        "'": "&apos;",
+    for {
+        token, err := decoder.Token()
+        if err == io.EOF {
+            break
+        }
+        if err != nil {
+            return nil, fmt.Errorf("XML decode error: %v", err)
+        }
+        
+        switch t := token.(type) {
+        case xml.StartElement:
+            // 检查是否是需要替换URL的标签
+            if shouldReplaceURL(t) {
+                // 读取内容并替换URL
+                var content string
+                if err := decoder.DecodeElement(&content, &t); err != nil {
+                    return nil, fmt.Errorf("failed to decode element: %v", err)
+                }
+                
+                // 只替换非空URL
+                if strings.TrimSpace(content) != "" {
+                    newURL := createProxyURL(baseURL, content, authType, authInfo)
+                    if err := encoder.EncodeElement(newURL, t); err != nil {
+                        return nil, fmt.Errorf("failed to encode element: %v", err)
+                    }
+                } else {
+                    // 如果内容为空，原样写入
+                    if err := encoder.EncodeElement(content, &t); err != nil {
+                        return nil, fmt.Errorf("failed to encode empty element: %v", err)
+                    }
+                }
+                continue
+            }
+            
+            // 检查是否是包含URL属性的标签
+            if shouldReplaceAttributeURL(t) {
+                // 复制开始标签
+                if err := encoder.EncodeToken(t); err != nil {
+                    return nil, fmt.Errorf("failed to encode start element: %v", err)
+                }
+                
+                // 处理属性
+                for i, attr := range t.Attr {
+                    if shouldReplaceAttributeName(t.Name.Local, attr.Name.Local) {
+                        if strings.TrimSpace(attr.Value) != "" {
+                            t.Attr[i].Value = createProxyURL(baseURL, attr.Value, authType, authInfo)
+                        }
+                    }
+                }
+                
+                // 读取子内容
+                var content interface{}
+                if err := decoder.DecodeElement(&content, &t); err != nil {
+                    return nil, fmt.Errorf("failed to decode element with attributes: %v", err)
+                }
+                
+                // 写入修改后的开始标签和内容
+                if err := encoder.EncodeElement(content, t); err != nil {
+                    return nil, fmt.Errorf("failed to encode element with modified attributes: %v", err)
+                }
+                continue
+            }
+            
+        case xml.EndElement:
+            // 正常处理结束标签
+            if err := encoder.EncodeToken(t); err != nil {
+                return nil, fmt.Errorf("failed to encode end element: %v", err)
+            }
+            continue
+            
+        case xml.CharData:
+            // 正常处理文本内容
+            if err := encoder.EncodeToken(t); err != nil {
+                return nil, fmt.Errorf("failed to encode char data: %v", err)
+            }
+            continue
+            
+        case xml.Comment:
+            // 保留注释
+            if err := encoder.EncodeToken(t); err != nil {
+                return nil, fmt.Errorf("failed to encode comment: %v", err)
+            }
+            continue
+            
+        case xml.ProcInst:
+            // 保留处理指令（如XML声明）
+            if err := encoder.EncodeToken(t); err != nil {
+                return nil, fmt.Errorf("failed to encode proc inst: %v", err)
+            }
+            continue
+        }
+        
+        // 默认情况：原样写入token
+        if err := encoder.EncodeToken(token); err != nil {
+            return nil, fmt.Errorf("failed to encode token: %v", err)
+        }
     }
     
-    for old, new := range replacements {
-        result = strings.ReplaceAll(result, old, new)
+    // 结束编码
+    if err := encoder.Flush(); err != nil {
+        return nil, fmt.Errorf("failed to flush encoder: %v", err)
     }
     
-    return result
+    // 添加XML头部
+    result := buf.Bytes()
+    if !bytes.HasPrefix(result, []byte("<?xml")) {
+        result = append([]byte(xml.Header), result...)
+    }
+    
+    return result, nil
 }
  
+// shouldReplaceURL 判断是否需要替换该标签的内容
+func shouldReplaceURL(element xml.StartElement) bool {
+    // 检查标签名
+    tagName := element.Name.Local
+    
+    // 需要替换URL的标签列表
+    urlTags := map[string]bool{
+        "url":   true,  // image/url
+        "href":  true,  // itunes:image@href
+    }
+    
+    return urlTags[tagName]
+}
+ 
+// shouldReplaceAttributeURL 判断是否需要替换该标签的属性URL
+func shouldReplaceAttributeURL(element xml.StartElement) bool {
+    tagName := element.Name.Local
+    
+    // 需要替换属性URL的标签列表
+    attrURLTags := map[string]bool{
+        "enclosure": true,  // enclosure@url
+        "image":     true,  // image@url (某些格式)
+    }
+    
+    return attrURLTags[tagName]
+}
+ 
+// shouldReplaceAttributeName 判断是否需要替换该属性名
+func shouldReplaceAttributeName(tagName, attrName string) bool {
+    // 需要替换的属性名列表
+    urlAttrs := map[string]bool{
+        "url":  true,  // enclosure@url, image@url
+        "href": true,  // itunes:image@href
+    }
+    
+    return urlAttrs[attrName]
+}
+ 
+// proxyHandler 保持不变
 func proxyHandler(w http.ResponseWriter, r *http.Request) {
     targetURL := r.URL.Query().Get("url")
     if targetURL == "" {
@@ -322,9 +322,6 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
         req.Header.Set("User-Agent", "podcast-proxy/1.0")
     }
     
-    // 添加Accept-Encoding支持
-    req.Header.Set("Accept-Encoding", "gzip, deflate")
-    
     resp, err := httpClient.Do(req)
     if err != nil {
         log.Printf("Failed to fetch target URL: %v", err)
@@ -342,27 +339,14 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
     
     w.WriteHeader(resp.StatusCode)
     
-    // 处理压缩响应
-    var reader io.Reader = resp.Body
-    contentEncoding := resp.Header.Get("Content-Encoding")
-    
-    if strings.Contains(strings.ToLower(contentEncoding), "gzip") {
-        gzipReader, err := gzip.NewReader(resp.Body)
-        if err != nil {
-            log.Printf("Failed to create gzip reader for proxy: %v", err)
-            return
-        }
-        defer gzipReader.Close()
-        reader = gzipReader
-    }
-    
     // 流式复制响应体
-    _, err = io.Copy(w, reader)
+    _, err = io.Copy(w, resp.Body)
     if err != nil {
         log.Printf("Error copying response body: %v", err)
     }
 }
  
+// indexHandler 保持不变
 func indexHandler(w http.ResponseWriter, r *http.Request) {
     if r.URL.Path != "/" {
         http.NotFound(w, r)
@@ -394,7 +378,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
     fmt.Fprint(w, html)
 }
  
-// --- 辅助函数 (Helpers) ---
+// --- 辅助函数 (Helpers) 保持不变 ---
  
 // 获取当前认证类型和认证信息
 func getAuthInfo(r *http.Request) (authType string, authInfo string) {
