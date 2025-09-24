@@ -11,6 +11,7 @@ import (
     "log"
     "net/http"
     "net/url"
+    "regexp"
     "strings"
     "time"
 )
@@ -21,6 +22,45 @@ func min(a, b int) int {
         return a
     }
     return b
+}
+ 
+// rewriteURLsInXML 在XML内容中重写URL
+func rewriteURLsInXML(xmlContent, baseURL, authType, authInfo string) string {
+    result := xmlContent
+    
+    // 构建代理URL前缀
+    proxyPrefix := baseURL + "/proxy?"
+    if authType == "apikey" {
+        proxyPrefix += "apikey=" + authInfo + "&url="
+    } else if authType == "userpass" {
+        creds := strings.SplitN(authInfo, ":", 2)
+        if len(creds) == 2 {
+            proxyPrefix += "username=" + creds[0] + "&password=" + creds[1] + "&url="
+        }
+    }
+    
+    // 使用正则表达式匹配并替换URL
+    // 1. 替换enclosure标签中的url属性
+    enclosurePattern := regexp.MustCompile(`(<enclosure\s+url=")([^"]+)`)
+    result = enclosurePattern.ReplaceAllString(result, `$1`+proxyPrefix+`$2`)
+    
+    // 2. 替换image标签中的url
+    imageURLPattern := regexp.MustCompile(`(<image>\s*<url>)([^<]+)`)
+    result = imageURLPattern.ReplaceAllString(result, `$1`+proxyPrefix+`$2`)
+    
+    // 3. 替换itunes:image标签中的href属性
+    itunesImagePattern := regexp.MustCompile(`(<itunes:image\s+href=")([^"]+)`)
+    result = itunesImagePattern.ReplaceAllString(result, `$1`+proxyPrefix+`$2`)
+    
+    // 4. 替换channel中的image url
+    channelImagePattern := regexp.MustCompile(`(<image>\s*<url>)([^<]+)`)
+    result = channelImagePattern.ReplaceAllString(result, `$1`+proxyPrefix+`$2`)
+    
+    // 5. 替换item中的image url
+    itemImagePattern := regexp.MustCompile(`(<item>.*?<image>\s*<url>)([^<]+)`)
+    result = itemImagePattern.ReplaceAllString(result, `$1`+proxyPrefix+`$2`)
+    
+    return result
 }
  
 func feedHandler(w http.ResponseWriter, r *http.Request) {
@@ -167,53 +207,21 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
     
-    var feed RSS
-    if err := xml.Unmarshal(body, &feed); err != nil {
-        log.Printf("Failed to parse XML: %v", err)
-        log.Printf("Raw response body (first 1000 chars): %s", string(body[:min(1000, len(body))]))
-        http.Error(w, fmt.Sprintf("Failed to parse feed XML: %v", err), http.StatusInternalServerError)
-        return
-    }
-    
-    log.Printf("Successfully parsed RSS feed with %d items", len(feed.Channel.Items))
-    
-    // 获取认证信息并URL重写
+    // 获取认证信息
     authType, authInfo := getAuthInfo(r)
     baseURL := getBaseURL(r)
     
-    if feed.Channel.Image.URL != "" {
-        feed.Channel.Image.URL = createProxyURL(baseURL, feed.Channel.Image.URL, authType, authInfo)
-    }
-    if feed.Channel.ITunesImage.Href != "" {
-        feed.Channel.ITunesImage.Href = createProxyURL(baseURL, feed.Channel.ITunesImage.Href, authType, authInfo)
-    }
+    // 使用字符串替换重写URL，保持原始XML结构
+    modifiedContent := rewriteURLsInXML(string(body), baseURL, authType, authInfo)
     
-    for i := range feed.Channel.Items {
-        item := &feed.Channel.Items[i]
-        if item.Enclosure.URL != "" {
-            item.Enclosure.URL = createProxyURL(baseURL, item.Enclosure.URL, authType, authInfo)
-        }
-        if item.ITunesImage.Href != "" {
-            item.ITunesImage.Href = createProxyURL(baseURL, item.ITunesImage.Href, authType, authInfo)
-        }
-    }
-    
-    newXML, err := xml.MarshalIndent(feed, "", "  ")
-    if err != nil {
-        log.Printf("Failed to marshal XML: %v", err)
-        http.Error(w, fmt.Sprintf("Failed to generate new XML: %v", err), http.StatusInternalServerError)
-        return
-    }
-    
-    // 添加 XML 头部
-    fullXML := []byte(xml.Header + string(newXML))
+    log.Printf("URL rewriting completed. Modified content length: %d bytes", len(modifiedContent))
     
     // 缓存结果
-    cache.Set(cacheKey, fullXML, config.CacheExpiration)
+    cache.Set(cacheKey, []byte(modifiedContent), config.CacheExpiration)
     
     // 确保设置正确的Content-Type（可能会覆盖从原始响应复制的）
     w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-    w.Write(fullXML)
+    w.Write([]byte(modifiedContent))
 }
  
 func proxyHandler(w http.ResponseWriter, r *http.Request) {
