@@ -7,16 +7,16 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp" // 导入 regexp 包
+	"regexp"
 	"strings"
 	"time"
 )
 
 var apiKeyEnv string
+var forceHTTPS bool // 新增变量
 
 func main() {
 	// 从环境变量读取 API Key
-	// 优先 PODCAST_PROXY_APIKEY，其次 API_KEY
 	apiKey := os.Getenv("PODCAST_PROXY_APIKEY")
 	if apiKey == "" {
 		apiKey = os.Getenv("API_KEY")
@@ -25,6 +25,9 @@ func main() {
 		log.Fatal("请设置环境变量 PODCAST_PROXY_APIKEY 或 API_KEY 以提供访问密钥")
 	}
 	apiKeyEnv = apiKey
+
+	// 环境变量控制是否强制 https
+	forceHTTPS = os.Getenv("FORCE_HTTPS") == "true"
 
 	// 端口，默认 8080
 	port := os.Getenv("PORT")
@@ -75,7 +78,6 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		// 直接透传源站的错误响应体，可能包含有用信息
 		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 		w.WriteHeader(resp.StatusCode)
 		io.Copy(w, resp.Body)
@@ -91,7 +93,9 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 构造代理 URL 模板
 	scheme := "http"
-	if r.TLS != nil {
+	if forceHTTPS {
+		scheme = "https"
+	} else if r.TLS != nil {
 		scheme = "https"
 	}
 	host := r.Host
@@ -143,7 +147,7 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 
 		if isImage {
 			proxyFunc = proxyForImage
-		} else if !isAudio { // 如果 type 属性不存在或不是 audio，则进行回退判断
+		} else if !isAudio {
 			urlRegex := regexp.MustCompile(`url="([^"]+)"`)
 			urlMatch := urlRegex.FindStringSubmatch(match)
 			if len(urlMatch) > 1 {
@@ -165,13 +169,11 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 
-	// 规则6 (可选但推荐): 替换 <atom:link rel="self" href="...">
-	// 这可以防止播客客户端在下次刷新时绕过代理
+	// 规则6: 替换 <atom:link rel="self" href="...">
 	reAtomLink := regexp.MustCompile(`(<atom:link\s+[^>]*?rel="self"[^>]*?href=")([^"]+)`)
 	selfURL := fmt.Sprintf("%s://%s%s", scheme, host, r.RequestURI)
 	content = reAtomLink.ReplaceAllStringFunc(content, func(match string) string {
 		parts := reAtomLink.FindStringSubmatch(match)
-		// 使用 xml.EscapeString 对 URL 进行转义，以防 URL 中包含 & 等特殊字符
 		return parts[1] + selfURL
 	})
 
@@ -183,8 +185,6 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 设置自身的 Content-Type，并写出转换后的 RSS
 	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
-	// 长度由 http 库自动处理，不再需要手动设置
-	// w.Header().Set("Content-Length", strconv.Itoa(len(transformed)))
 	w.WriteHeader(http.StatusOK)
 	w.Write(transformed)
 }
@@ -204,22 +204,17 @@ func audioHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 请求原始音频，自动处理跳转
 	req, err := http.NewRequest("GET", origURL, nil)
 	if err != nil {
 		http.Error(w, "无效的音频 URL: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	req.Header.Set("User-Agent", "PodcastProxy/1.0")
-	// 透传 Range 请求头，以支持音频拖动
 	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
 		req.Header.Set("Range", rangeHeader)
 	}
 
-	client := http.Client{
-		// 注意：代理大文件时不应设置过短的超时
-		// Timeout: 60 * time.Second,
-	}
+	client := http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		http.Error(w, "获取音频失败: "+err.Error(), http.StatusBadGateway)
@@ -227,7 +222,6 @@ func audioHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// 透传原始响应头
 	copyHeader(w, resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
@@ -256,7 +250,7 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 	req.Header.Set("User-Agent", "PodcastProxy/1.0")
 
 	client := http.Client{
-		Timeout: 30 * time.Second, // 图片超时可以短一些
+		Timeout: 30 * time.Second,
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -281,20 +275,17 @@ func copyHeader(dst http.ResponseWriter, src http.Header) {
 
 // 透明复制响应头（转发播客 RSS 的响应头），跳过不合适的字段
 func forwardRSSHeaders(w http.ResponseWriter, src http.Header) {
-	// Hop-by-hop headers. These are removed when sent to the backend.
-	// http://www.w3.org/Protocols/rfc2616/rfc2616-sec13.html
 	hopByHopHeaders := []string{
 		"Connection",
 		"Keep-Alive",
 		"Proxy-Authenticate",
 		"Proxy-Authorization",
-		"Te", // canonicalized version of "TE"
+		"Te",
 		"Trailers",
 		"Transfer-Encoding",
 		"Upgrade",
-		// 以下为自定义添加，因为内容会被重写
 		"Content-Length",
-		"Content-Encoding", // 例如 gzip，因为我们解压后处理了，需要重新编码
+		"Content-Encoding",
 	}
 
 	for k, vv := range src {
@@ -308,12 +299,9 @@ func forwardRSSHeaders(w http.ResponseWriter, src http.Header) {
 		if isHopByHop {
 			continue
 		}
-
-		// 不覆盖我们自己设置的 Content-Type
 		if strings.EqualFold(k, "Content-Type") {
 			continue
 		}
-
 		for _, v := range vv {
 			w.Header().Add(k, v)
 		}
