@@ -1,5 +1,5 @@
 package main
-
+ 
 import (
 	"fmt"
 	"io"
@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 )
-
+ 
 var apiKeyEnv string
 var forceHTTPS bool // 新增变量
-
+ 
 func main() {
 	// 从环境变量读取 API Key
 	apiKey := os.Getenv("PODCAST_PROXY_APIKEY")
@@ -25,25 +25,25 @@ func main() {
 		log.Fatal("请设置环境变量 PODCAST_PROXY_APIKEY 或 API_KEY 以提供访问密钥")
 	}
 	apiKeyEnv = apiKey
-
+ 
 	// 环境变量控制是否强制 https
 	forceHTTPS = os.Getenv("FORCE_HTTPS") == "true"
-
+ 
 	// 端口，默认 8080
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 	addr := ":" + port
-
+ 
 	http.HandleFunc("/feed", feedHandler)
 	http.HandleFunc("/audio", audioHandler)
 	http.HandleFunc("/image", imageHandler)
-
+ 
 	log.Printf("Podcast proxy 服务启动，监听 %s", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
-
+ 
 // /feed?url=原始RSS源URL&apikey=密钥
 func feedHandler(w http.ResponseWriter, r *http.Request) {
 	// 校验 apikey
@@ -52,13 +52,13 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
 		return
 	}
-
+ 
 	feedURL := r.URL.Query().Get("url")
 	if feedURL == "" {
 		http.Error(w, "url 参数是必填项", http.StatusBadRequest)
 		return
 	}
-
+ 
 	// 获取原始 RSS
 	req, err := http.NewRequest("GET", feedURL, nil)
 	if err != nil {
@@ -66,7 +66,7 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("User-Agent", "PodcastProxy/1.0")
-
+ 
 	client := http.Client{
 		Timeout: 30 * time.Second,
 	}
@@ -76,7 +76,7 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-
+ 
 	if resp.StatusCode >= 400 {
 		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 		w.WriteHeader(resp.StatusCode)
@@ -84,13 +84,13 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("源 RSS 返回错误: %s, URL: %s", resp.Status, feedURL)
 		return
 	}
-
+ 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		http.Error(w, "读取源 RSS 失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-
+ 
 	// 构造代理 URL 模板
 	scheme := "http"
 	if forceHTTPS {
@@ -99,52 +99,56 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 		scheme = "https"
 	}
 	host := r.Host
-
+	// 如果设置了 PUBLIC_HOST 环境变量，则强制使用该域名
+	if publicHost := os.Getenv("PUBLIC_HOST"); publicHost != "" {
+		host = publicHost
+	}
+ 
 	proxyForAudio := func(orig string) string {
 		return fmt.Sprintf("%s://%s/audio?url=%s&apikey=%s", scheme, host, url.QueryEscape(orig), url.QueryEscape(apikey))
 	}
 	proxyForImage := func(orig string) string {
 		return fmt.Sprintf("%s://%s/image?url=%s&apikey=%s", scheme, host, url.QueryEscape(orig), url.QueryEscape(apikey))
 	}
-
+ 
 	// ---- 使用正则表达式进行替换 ----
 	content := string(bodyBytes)
-
+ 
 	// 规则1: 替换 <enclosure url="...">
 	reEnclosure := regexp.MustCompile(`(<enclosure\s+[^>]*?url=")([^"]+)`)
 	content = reEnclosure.ReplaceAllStringFunc(content, func(match string) string {
 		parts := reEnclosure.FindStringSubmatch(match)
 		return parts[1] + proxyForAudio(parts[2])
 	})
-
+ 
 	// 规则2: 替换 <itunes:image href="...">
 	reItunesImage := regexp.MustCompile(`(<itunes:image\s+[^>]*?href=")([^"]+)`)
 	content = reItunesImage.ReplaceAllStringFunc(content, func(match string) string {
 		parts := reItunesImage.FindStringSubmatch(match)
 		return parts[1] + proxyForImage(parts[2])
 	})
-
+ 
 	// 规则3: 替换 <image><url>...</url></image>
 	reImageURL := regexp.MustCompile(`(<image>[\s\S]*?<url>)([^<]+)(<\/url>)`)
 	content = reImageURL.ReplaceAllStringFunc(content, func(match string) string {
 		parts := reImageURL.FindStringSubmatch(match)
 		return parts[1] + proxyForImage(strings.TrimSpace(parts[2])) + parts[3]
 	})
-
+ 
 	// 规则4: 替换 <media:thumbnail url="...">
 	reMediaThumbnail := regexp.MustCompile(`(<media:thumbnail\s+[^>]*?url=")([^"]+)`)
 	content = reMediaThumbnail.ReplaceAllStringFunc(content, func(match string) string {
 		parts := reMediaThumbnail.FindStringSubmatch(match)
 		return parts[1] + proxyForImage(parts[2])
 	})
-
+ 
 	// 规则5: 替换 <media:content url="...">
 	reMediaContent := regexp.MustCompile(`<media:content\s+[^>]*?url="[^"]+"[^>]*>`)
 	content = reMediaContent.ReplaceAllStringFunc(content, func(match string) string {
 		isAudio := strings.Contains(match, `type="audio/`)
 		isImage := strings.Contains(match, `type="image/`)
 		proxyFunc := proxyForAudio // 默认是音频代理
-
+ 
 		if isImage {
 			proxyFunc = proxyForImage
 		} else if !isAudio {
@@ -161,14 +165,14 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-
+ 
 		urlAttrRegex := regexp.MustCompile(`(url=")([^"]+)`)
 		return urlAttrRegex.ReplaceAllStringFunc(match, func(attrMatch string) string {
 			parts := urlAttrRegex.FindStringSubmatch(attrMatch)
 			return parts[1] + proxyFunc(parts[2])
 		})
 	})
-
+ 
 	// 规则6: 替换 <atom:link rel="self" href="...">
 	reAtomLink := regexp.MustCompile(`(<atom:link\s+[^>]*?rel="self"[^>]*?href=")([^"]+)`)
 	selfURL := fmt.Sprintf("%s://%s%s", scheme, host, r.RequestURI)
@@ -176,19 +180,19 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 		parts := reAtomLink.FindStringSubmatch(match)
 		return parts[1] + selfURL
 	})
-
+ 
 	transformed := []byte(content)
 	// ---- 替换结束 ----
-
+ 
 	// 转发源 RSS 的响应头
 	forwardRSSHeaders(w, resp.Header)
-
+ 
 	// 设置自身的 Content-Type，并写出转换后的 RSS
 	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write(transformed)
 }
-
+ 
 // /audio?url=原始音频URL&apikey=密钥
 func audioHandler(w http.ResponseWriter, r *http.Request) {
 	// 认证
@@ -197,13 +201,13 @@ func audioHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
 		return
 	}
-
+ 
 	origURL := r.URL.Query().Get("url")
 	if origURL == "" {
 		http.Error(w, "url 参数是必填项", http.StatusBadRequest)
 		return
 	}
-
+ 
 	req, err := http.NewRequest("GET", origURL, nil)
 	if err != nil {
 		http.Error(w, "无效的音频 URL: "+err.Error(), http.StatusBadRequest)
@@ -213,7 +217,7 @@ func audioHandler(w http.ResponseWriter, r *http.Request) {
 	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
 		req.Header.Set("Range", rangeHeader)
 	}
-
+ 
 	client := http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -221,12 +225,12 @@ func audioHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-
+ 
 	copyHeader(w, resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }
-
+ 
 // /image?url=原始图片URL&apikey=密钥
 func imageHandler(w http.ResponseWriter, r *http.Request) {
 	// 认证
@@ -235,20 +239,20 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
 		return
 	}
-
+ 
 	origURL := r.URL.Query().Get("url")
 	if origURL == "" {
 		http.Error(w, "url 参数是必填项", http.StatusBadRequest)
 		return
 	}
-
+ 
 	req, err := http.NewRequest("GET", origURL, nil)
 	if err != nil {
 		http.Error(w, "无效的图片 URL: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	req.Header.Set("User-Agent", "PodcastProxy/1.0")
-
+ 
 	client := http.Client{
 		Timeout: 30 * time.Second,
 	}
@@ -258,12 +262,12 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-
+ 
 	copyHeader(w, resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }
-
+ 
 // helper：把源响应头透传到目标响应
 func copyHeader(dst http.ResponseWriter, src http.Header) {
 	for k, vv := range src {
@@ -272,7 +276,7 @@ func copyHeader(dst http.ResponseWriter, src http.Header) {
 		}
 	}
 }
-
+ 
 // 透明复制响应头（转发播客 RSS 的响应头），跳过不合适的字段
 func forwardRSSHeaders(w http.ResponseWriter, src http.Header) {
 	hopByHopHeaders := []string{
@@ -287,7 +291,7 @@ func forwardRSSHeaders(w http.ResponseWriter, src http.Header) {
 		"Content-Length",
 		"Content-Encoding",
 	}
-
+ 
 	for k, vv := range src {
 		isHopByHop := false
 		for _, h := range hopByHopHeaders {
