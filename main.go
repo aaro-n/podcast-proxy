@@ -1,6 +1,7 @@
 package main
  
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -36,8 +37,12 @@ func main() {
 	}
 	addr := ":" + port
  
+	// register with trailing slash for prefix matching because we
+	// accept /audio/<apikey> and /image/<apikey> paths too.
 	http.HandleFunc("/feed", feedHandler)
+	http.HandleFunc("/audio/", audioHandler) // also handles /audio
 	http.HandleFunc("/audio", audioHandler)
+	http.HandleFunc("/image/", imageHandler)
 	http.HandleFunc("/image", imageHandler)
  
 	log.Printf("Podcast proxy 服务启动，监听 %s", addr)
@@ -52,6 +57,8 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
 		return
 	}
+	// encode key for inclusion in generated URLs
+	encodedKey := base64.StdEncoding.EncodeToString([]byte(apikey))
  
 	feedURL := r.URL.Query().Get("url")
 	if feedURL == "" {
@@ -192,8 +199,9 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 	// 这样分页链接依然会通过代理，从而在浏览器中呈现分页按钮。
 	reAtomLink := regexp.MustCompile(`(<atom:link\s+[^>]*?href=")([^\"]+)("[^>]*>)`)
 	proxyForFeed := func(orig string) string {
-		return fmt.Sprintf("%s://%s/feed?url=%s&apikey=%s", scheme, host,
-			url.QueryEscape(orig), url.QueryEscape(apikey))
+		raw := fmt.Sprintf("%s://%s/feed?url=%s&apikey=%s", scheme, host,
+			url.QueryEscape(orig), url.QueryEscape(encodedKey))
+		return xmlEscape(raw)
 	}
 	content = reAtomLink.ReplaceAllStringFunc(content, func(match string) string {
 		if !(strings.Contains(match, `rel="self"`) ||
@@ -224,13 +232,14 @@ func audioHandler(w http.ResponseWriter, r *http.Request) {
 	// 认证：先尝试 query，再看 path
 	apikey := r.URL.Query().Get("apikey")
 	if apikey == "" {
-		// path 格式可能是 /audio/{apikey}
-		// TrimPrefix 之后第一个段就是 key
 		if p := strings.TrimPrefix(r.URL.Path, "/audio/"); p != "" {
-			// path may include extra slash if nothing after key; split
 			parts := strings.SplitN(p, "/", 2)
 			apikey = parts[0]
 		}
+	}
+	// request may contain encoded key; decode if so
+	if decoded, err := base64.StdEncoding.DecodeString(apikey); err == nil {
+		apikey = string(decoded)
 	}
 	if apikey != apiKeyEnv {
 		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
@@ -275,6 +284,9 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 			parts := strings.SplitN(p, "/", 2)
 			apikey = parts[0]
 		}
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(apikey); err == nil {
+		apikey = string(decoded)
 	}
 	if apikey != apiKeyEnv {
 		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
