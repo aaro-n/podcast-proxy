@@ -134,6 +134,11 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 	}
  
 	// ---- 使用正则表达式进行替换 ----
+	// We only rewrite URLs for audio, image and pagination links.  Other
+	// elements including descriptions, titles, etc. are left untouched.
+	// If the feed contains an xml-stylesheet reference, proxy that too so
+	// browser can fetch the style from our domain instead of failing with
+	// a 404 when the href is relative.
 	content := string(bodyBytes)
  
 	// 规则1: 替换 <enclosure url="...">
@@ -195,7 +200,16 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	})
  
-	// 规则6: 改写 atom:link 中的 href，至少处理 self/first/last/next/prev
+	// 规则4: 如果存在 <\?xml-stylesheet ... href="...">，则代理样式文件。
+	// 样式不是音频/图片，但我们也希望浏览器从代理域名加载它们而不是
+	// 出现 404，于是我们把它指向 /image/。
+	reStylesheet := regexp.MustCompile(`(<\?xml-stylesheet[^>]*href=")([^"]+)(")`)
+	content = reStylesheet.ReplaceAllStringFunc(content, func(match string) string {
+		parts := reStylesheet.FindStringSubmatch(match)
+		return parts[1] + proxyForImage(parts[2]) + parts[3]
+	})
+
+	// 规则5: 改写 atom:link 中的 href，至少处理 self/first/last/next/prev
 	// 这样分页链接依然会通过代理，从而在浏览器中呈现分页按钮。
 	reAtomLink := regexp.MustCompile(`(<atom:link\s+[^>]*?href=")([^\"]+)("[^>]*>)`)
 	proxyForFeed := func(orig string) string {
