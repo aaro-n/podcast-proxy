@@ -39,15 +39,29 @@ func main() {
  
 	// register with trailing slash for prefix matching because we
 	// accept /audio/<apikey> and /image/<apikey> paths too.
-	http.HandleFunc("/feed", feedHandler)
-	http.HandleFunc("/audio/", audioHandler) // also handles /audio
-	http.HandleFunc("/audio", audioHandler)
-	http.HandleFunc("/image/", imageHandler)
-	http.HandleFunc("/image", imageHandler)
+
+	// Helper for logging
+	logHandler := func(h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			log.Printf("Start: %s %s from %s", r.Method, r.URL.String(), r.RemoteAddr)
+			h(w, r)
+			duration := time.Since(start)
+			log.Printf("Completed: %s %s in %v", r.Method, r.URL.String(), duration)
+		}
+	}
+
+	http.HandleFunc("/feed", logHandler(feedHandler))
+	http.HandleFunc("/audio/", logHandler(audioHandler)) // also handles /audio
+	http.HandleFunc("/audio", logHandler(audioHandler))
+	http.HandleFunc("/image/", logHandler(imageHandler))
+	http.HandleFunc("/image", logHandler(imageHandler))
 	// 样式代理独立路径
-	http.HandleFunc("/style/", styleHandler)
-	http.HandleFunc("/style", styleHandler)
- 
+	http.HandleFunc("/style/", logHandler(styleHandler))
+	http.HandleFunc("/style", logHandler(styleHandler))
+
+	// 生成器页面
+	http.HandleFunc("/", logHandler(generateHandler))
 
 	log.Printf("Podcast proxy 服务启动，监听 %s", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
@@ -492,4 +506,103 @@ func forwardRSSHeaders(w http.ResponseWriter, src http.Header) {
 			w.Header().Add(k, v)
 		}
 	}
+}
+
+// 简单的生成器页面
+func generateHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	
+	html := `
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Podcast Proxy Generator</title>
+	<style>
+		body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; max-width: 600px; margin: 2rem auto; padding: 2rem; background-color: #f4f6f8; color: #333; }
+		h1 { text-align: center; color: #2c3e50; margin-bottom: 2rem; }
+		.card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+		.form-group { margin-bottom: 1.5rem; }
+		label { display: block; margin-bottom: 0.5rem; font-weight: 600; color: #495057; }
+		input[type="text"], input[type="password"] { width: 100%; padding: 0.75rem; font-size: 1rem; border: 1px solid #ced4da; border-radius: 4px; box-sizing: border-box; transition: border-color 0.15s ease-in-out; }
+		input:focus { border-color: #80bdff; outline: 0; box-shadow: 0 0 0 0.2rem rgba(0,123,255,.25); }
+		button { display: block; width: 100%; padding: 0.75rem; font-size: 1rem; font-weight: 600; color: white; background-color: #007bff; border: none; border-radius: 4px; cursor: pointer; transition: background-color 0.15s ease-in-out; }
+		button:hover { background-color: #0056b3; }
+		#result { margin-top: 2rem; display: none; }
+		.result-box { padding: 1rem; background-color: #e9ecef; border-radius: 4px; word-break: break-all; font-family: monospace; border: 1px solid #dee2e6; position: relative; }
+		.copy-btn { position: absolute; top: 5px; right: 5px; font-size: 0.8rem; padding: 0.2rem 0.5rem; background: #6c757d; color: white; border-radius: 3px; cursor: pointer; }
+		.copy-btn:hover { background: #5a6268; }
+	</style>
+</head>
+<body>
+	<div class="card">
+		<h1>Podcast Proxy</h1>
+		<div class="form-group">
+			<label for="url">Podcast Feed URL (原始RSS地址)</label>
+			<input type="text" id="url" placeholder="https://example.com/feed.xml" required>
+		</div>
+		<div class="form-group">
+			<label for="apikey">API Key (访问密钥)</label>
+			<input type="password" id="apikey" placeholder="输入 API Key" required>
+		</div>
+		<button onclick="generate()">生成代理链接</button>
+
+		<div id="result">
+			<label>代理后的 Feed URL:</label>
+			<div class="result-box">
+				<span id="output"></span>
+				<button class="copy-btn" onclick="copyToClipboard()">复制</button>
+			</div>
+		</div>
+	</div>
+
+	<script>
+		function generate() {
+			const urlInput = document.getElementById('url');
+			const keyInput = document.getElementById('apikey');
+			const url = urlInput.value.trim();
+			const apikey = keyInput.value.trim();
+			
+			if (!url || !apikey) {
+				alert('请填写完整的 RSS URL 和 API Key');
+				return;
+			}
+			
+			// 简单的 URL 校验
+			try {
+				new URL(url);
+			} catch (_) {
+				alert('请输入有效的 URL (例如 https://...)');
+				return;
+			}
+
+			const currentHost = window.location.protocol + "//" + window.location.host;
+			const proxyUrl = currentHost + "/feed?url=" + encodeURIComponent(url) + "&apikey=" + encodeURIComponent(apikey);
+			
+			const output = document.getElementById('output');
+			output.textContent = proxyUrl;
+			document.getElementById('result').style.display = 'block';
+		}
+
+		function copyToClipboard() {
+			const text = document.getElementById('output').textContent;
+			navigator.clipboard.writeText(text).then(() => {
+				const btn = document.querySelector('.copy-btn');
+				const origText = btn.textContent;
+				btn.textContent = '已复制!';
+				setTimeout(() => btn.textContent = origText, 2000);
+			}).catch(err => {
+				console.error('无法复制', err);
+			});
+		}
+	</script>
+</body>
+</html>
+`
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(html))
 }
