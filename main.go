@@ -104,19 +104,25 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 		host = publicHost
 	}
  
-	// helper to ensure we don't break XML by leaving raw ampersands,
-	// quotes, etc.  html.EscapeString will convert & -> &amp; etc.
+	// helper to escape characters that would break an XML attribute value.
+	// after we switch to placing the key in the path there will be no unescaped
+	// ampersand at the top level, but keep the function for safety (it is
+	// basically a no-op now).
 	xmlEscape := func(s string) string {
 		return strings.ReplaceAll(strings.ReplaceAll(s, "&", "&amp;"), "\"", "&quot;")
 	}
 
 	proxyForAudio := func(orig string) string {
-		// build the URL normally then escape special chars for XML attribute
-		raw := fmt.Sprintf("%s://%s/audio?url=%s&apikey=%s", scheme, host, url.QueryEscape(orig), url.QueryEscape(apikey))
+		// Put the API key in the path so we avoid a second query parameter.
+		// the only top-level `?` will precede `url=`; the value of that
+		// parameter is QueryEscaped, so it contains no unescaped ampersands.
+		raw := fmt.Sprintf("%s://%s/audio/%s?url=%s", scheme, host,
+			url.PathEscape(apikey), url.QueryEscape(orig))
 		return xmlEscape(raw)
 	}
 	proxyForImage := func(orig string) string {
-		raw := fmt.Sprintf("%s://%s/image?url=%s&apikey=%s", scheme, host, url.QueryEscape(orig), url.QueryEscape(apikey))
+		raw := fmt.Sprintf("%s://%s/image/%s?url=%s", scheme, host,
+			url.PathEscape(apikey), url.QueryEscape(orig))
 		return xmlEscape(raw)
 	}
  
@@ -182,16 +188,23 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	})
  
-	// 规则6: 替换 <atom:link> 中 href 属性，针对 rel="self" 的情况。
-	// 注意属性顺序可变，所以先捕获 href 整个标签，然后再检查 rel。
+	// 规则6: 改写 atom:link 中的 href，至少处理 self/first/last/next/prev
+	// 这样分页链接依然会通过代理，从而在浏览器中呈现分页按钮。
 	reAtomLink := regexp.MustCompile(`(<atom:link\s+[^>]*?href=")([^\"]+)("[^>]*>)`)
-	selfURL := fmt.Sprintf("%s://%s%s", scheme, host, r.RequestURI)
+	proxyForFeed := func(orig string) string {
+		return fmt.Sprintf("%s://%s/feed?url=%s&apikey=%s", scheme, host,
+			url.QueryEscape(orig), url.QueryEscape(apikey))
+	}
 	content = reAtomLink.ReplaceAllStringFunc(content, func(match string) string {
-		if !strings.Contains(match, `rel="self"`) {
+		if !(strings.Contains(match, `rel="self"`) ||
+			strings.Contains(match, `rel="first"`) ||
+			strings.Contains(match, `rel="last"`) ||
+			strings.Contains(match, `rel="next"`) ||
+			strings.Contains(match, `rel="prev"`)) {
 			return match
 		}
 		parts := reAtomLink.FindStringSubmatch(match)
-		return parts[1] + selfURL + parts[3]
+		return parts[1] + proxyForFeed(parts[2]) + parts[3]
 	})
  
 	transformed := []byte(content)
@@ -208,8 +221,17 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
  
 // /audio?url=原始音频URL&apikey=密钥
 func audioHandler(w http.ResponseWriter, r *http.Request) {
-	// 认证
+	// 认证：先尝试 query，再看 path
 	apikey := r.URL.Query().Get("apikey")
+	if apikey == "" {
+		// path 格式可能是 /audio/{apikey}
+		// TrimPrefix 之后第一个段就是 key
+		if p := strings.TrimPrefix(r.URL.Path, "/audio/"); p != "" {
+			// path may include extra slash if nothing after key; split
+			parts := strings.SplitN(p, "/", 2)
+			apikey = parts[0]
+		}
+	}
 	if apikey != apiKeyEnv {
 		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
 		return
@@ -246,8 +268,14 @@ func audioHandler(w http.ResponseWriter, r *http.Request) {
  
 // /image?url=原始图片URL&apikey=密钥
 func imageHandler(w http.ResponseWriter, r *http.Request) {
-	// 认证
+	// 认证：允许通过 path 提供 key
 	apikey := r.URL.Query().Get("apikey")
+	if apikey == "" {
+		if p := strings.TrimPrefix(r.URL.Path, "/image/"); p != "" {
+			parts := strings.SplitN(p, "/", 2)
+			apikey = parts[0]
+		}
+	}
 	if apikey != apiKeyEnv {
 		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
 		return
