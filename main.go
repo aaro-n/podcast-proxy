@@ -104,11 +104,20 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 		host = publicHost
 	}
  
+	// helper to ensure we don't break XML by leaving raw ampersands,
+	// quotes, etc.  html.EscapeString will convert & -> &amp; etc.
+	xmlEscape := func(s string) string {
+		return strings.ReplaceAll(strings.ReplaceAll(s, "&", "&amp;"), "\"", "&quot;")
+	}
+
 	proxyForAudio := func(orig string) string {
-		return fmt.Sprintf("%s://%s/audio?url=%s&apikey=%s", scheme, host, url.QueryEscape(orig), url.QueryEscape(apikey))
+		// build the URL normally then escape special chars for XML attribute
+		raw := fmt.Sprintf("%s://%s/audio?url=%s&apikey=%s", scheme, host, url.QueryEscape(orig), url.QueryEscape(apikey))
+		return xmlEscape(raw)
 	}
 	proxyForImage := func(orig string) string {
-		return fmt.Sprintf("%s://%s/image?url=%s&apikey=%s", scheme, host, url.QueryEscape(orig), url.QueryEscape(apikey))
+		raw := fmt.Sprintf("%s://%s/image?url=%s&apikey=%s", scheme, host, url.QueryEscape(orig), url.QueryEscape(apikey))
+		return xmlEscape(raw)
 	}
  
 	// ---- 使用正则表达式进行替换 ----
@@ -173,12 +182,16 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	})
  
-	// 规则6: 替换 <atom:link rel="self" href="...">
-	reAtomLink := regexp.MustCompile(`(<atom:link\s+[^>]*?rel="self"[^>]*?href=")([^"]+)`)
+	// 规则6: 替换 <atom:link> 中 href 属性，针对 rel="self" 的情况。
+	// 注意属性顺序可变，所以先捕获 href 整个标签，然后再检查 rel。
+	reAtomLink := regexp.MustCompile(`(<atom:link\s+[^>]*?href=")([^\"]+)("[^>]*>)`)
 	selfURL := fmt.Sprintf("%s://%s%s", scheme, host, r.RequestURI)
 	content = reAtomLink.ReplaceAllStringFunc(content, func(match string) string {
+		if !strings.Contains(match, `rel="self"`) {
+			return match
+		}
 		parts := reAtomLink.FindStringSubmatch(match)
-		return parts[1] + selfURL
+		return parts[1] + selfURL + parts[3]
 	})
  
 	transformed := []byte(content)
