@@ -44,7 +44,11 @@ func main() {
 	http.HandleFunc("/audio", audioHandler)
 	http.HandleFunc("/image/", imageHandler)
 	http.HandleFunc("/image", imageHandler)
+	// 样式代理独立路径
+	http.HandleFunc("/style/", styleHandler)
+	http.HandleFunc("/style", styleHandler)
  
+
 	log.Printf("Podcast proxy 服务启动，监听 %s", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
@@ -114,21 +118,24 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 	// helper to escape characters that would break an XML attribute value.
 	// after we switch to placing the key in the path there will be no unescaped
 	// ampersand at the top level, but keep the function for safety (it is
-	// basically a no-op now).
+	// basically a no-op now.
 	xmlEscape := func(s string) string {
 		return strings.ReplaceAll(strings.ReplaceAll(s, "&", "&amp;"), "\"", "&quot;")
 	}
 
 	proxyForAudio := func(orig string) string {
-		// Put the encoded key in the path so we avoid a second query parameter.
-		// the only top-level `?` will precede `url=`; the value of that
-		// parameter is QueryEscaped, so it contains no unescaped ampersands.
 		raw := fmt.Sprintf("%s://%s/audio/%s?url=%s", scheme, host,
 			url.PathEscape(encodedKey), url.QueryEscape(orig))
 		return xmlEscape(raw)
 	}
 	proxyForImage := func(orig string) string {
 		raw := fmt.Sprintf("%s://%s/image/%s?url=%s", scheme, host,
+			url.PathEscape(encodedKey), url.QueryEscape(orig))
+		return xmlEscape(raw)
+	}
+	// 样式 URL 的代理使用独立端口（如果有的话）
+	proxyForStyle := func(orig string) string {
+		raw := fmt.Sprintf("%s://%s/style/%s?url=%s", scheme, host,
 			url.PathEscape(encodedKey), url.QueryEscape(orig))
 		return xmlEscape(raw)
 	}
@@ -201,33 +208,18 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 	})
  
 	// 规则4: 如果存在 <\?xml-stylesheet ... href="...">，则代理样式文件。
-	// 样式不是音频/图片，但我们也希望浏览器从代理域名加载它们而不是
-	// 出现 404，于是我们把它指向 /image/。
+	// 样式文件单独通过 /style/ 路径，并可能使用独立端口。
 	reStylesheet := regexp.MustCompile(`(<\?xml-stylesheet[^>]*href=")([^"]+)(")`)
 	content = reStylesheet.ReplaceAllStringFunc(content, func(match string) string {
 		parts := reStylesheet.FindStringSubmatch(match)
-		return parts[1] + proxyForImage(parts[2]) + parts[3]
+		return parts[1] + proxyForStyle(parts[2]) + parts[3]
 	})
 
-	// 规则5: 改写 atom:link 中的 href，至少处理 self/first/last/next/prev
-	// 这样分页链接依然会通过代理，从而在浏览器中呈现分页按钮。
-	reAtomLink := regexp.MustCompile(`(<atom:link\s+[^>]*?href=")([^\"]+)("[^>]*>)`)
-	proxyForFeed := func(orig string) string {
-		raw := fmt.Sprintf("%s://%s/feed?url=%s&apikey=%s", scheme, host,
-			url.QueryEscape(orig), url.QueryEscape(encodedKey))
-		return xmlEscape(raw)
-	}
-	content = reAtomLink.ReplaceAllStringFunc(content, func(match string) string {
-		if !(strings.Contains(match, `rel="self"`) ||
-			strings.Contains(match, `rel="first"`) ||
-			strings.Contains(match, `rel="last"`) ||
-			strings.Contains(match, `rel="next"`) ||
-			strings.Contains(match, `rel="prev"`)) {
-			return match
-		}
-		parts := reAtomLink.FindStringSubmatch(match)
-		return parts[1] + proxyForFeed(parts[2]) + parts[3]
-	})
+	// NOTE: we intentionally leave atom:link entries untouched so that
+	// everything except images/audio (and optional stylesheet) remains
+	// identical to the original feed.  pagination links etc. will therefore
+	// still point at the upstream domain; this is OK if you only want
+	// the media assets proxied.
  
 	transformed := []byte(content)
 	// ---- 替换结束 ----
@@ -377,6 +369,76 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			encoded := base64.StdEncoding.EncodeToString([]byte(apikey))
 			newLoc := fmt.Sprintf("%s://%s/image/%s?url=%s",
+				scheme, host, url.PathEscape(encoded), url.QueryEscape(loc))
+			http.Redirect(w, r, newLoc, resp.StatusCode)
+			return
+		}
+	}
+
+	copyHeader(w, resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+// /style?url=原始样式URL&apikey=密钥
+// 这个处理器和 imageHandler 几乎一样
+func styleHandler(w http.ResponseWriter, r *http.Request) {
+	// 认证：允许通过 path 提供 key
+	apikey := r.URL.Query().Get("apikey")
+	if apikey == "" {
+		if p := strings.TrimPrefix(r.URL.Path, "/style/"); p != "" {
+			parts := strings.SplitN(p, "/", 2)
+			apikey = parts[0]
+		}
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(apikey); err == nil {
+		apikey = string(decoded)
+	}
+	if apikey != apiKeyEnv {
+		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
+		return
+	}
+ 
+	origURL := r.URL.Query().Get("url")
+	if origURL == "" {
+		http.Error(w, "url 参数是必填项", http.StatusBadRequest)
+		return
+	}
+	origURL = strings.ReplaceAll(origURL, "&amp;", "&")
+ 
+	req, err := http.NewRequest("GET", origURL, nil)
+	if err != nil {
+		http.Error(w, "无效的样式 URL: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Header.Set("User-Agent", "PodcastProxy/1.0")
+ 
+	client := http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, "获取样式失败: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		loc := resp.Header.Get("Location")
+		if loc != "" {
+			scheme := "http"
+			if forceHTTPS || r.TLS != nil {
+				scheme = "https"
+			}
+			host := r.Host
+			if publicHost := os.Getenv("PUBLIC_HOST"); publicHost != "" {
+				host = publicHost
+			}
+			encoded := base64.StdEncoding.EncodeToString([]byte(apikey))
+			newLoc := fmt.Sprintf("%s://%s/style/%s?url=%s",
 				scheme, host, url.PathEscape(encoded), url.QueryEscape(loc))
 			http.Redirect(w, r, newLoc, resp.StatusCode)
 			return
