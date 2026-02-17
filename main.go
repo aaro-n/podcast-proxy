@@ -120,16 +120,16 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	proxyForAudio := func(orig string) string {
-		// Put the API key in the path so we avoid a second query parameter.
+		// Put the encoded key in the path so we avoid a second query parameter.
 		// the only top-level `?` will precede `url=`; the value of that
 		// parameter is QueryEscaped, so it contains no unescaped ampersands.
 		raw := fmt.Sprintf("%s://%s/audio/%s?url=%s", scheme, host,
-			url.PathEscape(apikey), url.QueryEscape(orig))
+			url.PathEscape(encodedKey), url.QueryEscape(orig))
 		return xmlEscape(raw)
 	}
 	proxyForImage := func(orig string) string {
 		raw := fmt.Sprintf("%s://%s/image/%s?url=%s", scheme, host,
-			url.PathEscape(apikey), url.QueryEscape(orig))
+			url.PathEscape(encodedKey), url.QueryEscape(orig))
 		return xmlEscape(raw)
 	}
  
@@ -245,13 +245,15 @@ func audioHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
 		return
 	}
- 
+
 	origURL := r.URL.Query().Get("url")
 	if origURL == "" {
 		http.Error(w, "url 参数是必填项", http.StatusBadRequest)
 		return
 	}
- 
+	// unescape xml entities left in the query
+	origURL = strings.ReplaceAll(origURL, "&amp;", "&")
+
 	req, err := http.NewRequest("GET", origURL, nil)
 	if err != nil {
 		http.Error(w, "无效的音频 URL: "+err.Error(), http.StatusBadRequest)
@@ -262,14 +264,42 @@ func audioHandler(w http.ResponseWriter, r *http.Request) {
 		req.Header.Set("Range", rangeHeader)
 	}
  
-	client := http.Client{}
+	// create client that will not auto-follow redirects
+	client := http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		http.Error(w, "获取音频失败: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
- 
+
+	// if server responded with redirect, forward it (rewriting and
+	// re-encoding the location through our proxy)
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		loc := resp.Header.Get("Location")
+		if loc != "" {
+			scheme := "http"
+			if forceHTTPS || r.TLS != nil {
+				scheme = "https"
+			}
+			host := r.Host
+			if publicHost := os.Getenv("PUBLIC_HOST"); publicHost != "" {
+				host = publicHost
+			}
+			// construct new proxy location; key is already decoded earlier
+			encoded := base64.StdEncoding.EncodeToString([]byte(apikey))
+			newLoc := fmt.Sprintf("%s://%s/audio/%s?url=%s",
+				scheme, host, url.PathEscape(encoded), url.QueryEscape(loc))
+			http.Redirect(w, r, newLoc, resp.StatusCode)
+			return
+		}
+	}
+
 	copyHeader(w, resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
@@ -298,6 +328,7 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "url 参数是必填项", http.StatusBadRequest)
 		return
 	}
+	origURL = strings.ReplaceAll(origURL, "&amp;", "&")
  
 	req, err := http.NewRequest("GET", origURL, nil)
 	if err != nil {
@@ -308,6 +339,9 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
  
 	client := http.Client{
 		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -315,7 +349,26 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
- 
+
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		loc := resp.Header.Get("Location")
+		if loc != "" {
+			scheme := "http"
+			if forceHTTPS || r.TLS != nil {
+				scheme = "https"
+			}
+			host := r.Host
+			if publicHost := os.Getenv("PUBLIC_HOST"); publicHost != "" {
+				host = publicHost
+			}
+			encoded := base64.StdEncoding.EncodeToString([]byte(apikey))
+			newLoc := fmt.Sprintf("%s://%s/image/%s?url=%s",
+				scheme, host, url.PathEscape(encoded), url.QueryEscape(loc))
+			http.Redirect(w, r, newLoc, resp.StatusCode)
+			return
+		}
+	}
+
 	copyHeader(w, resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
