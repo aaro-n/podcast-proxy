@@ -15,7 +15,25 @@ import (
  
 var apiKeyEnv string
 var forceHTTPS bool // 新增变量
- 
+
+// 全局 HTTP 客户端 - 避免重复创建
+var httpClient = &http.Client{
+	Timeout: 30 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
+// 预编译正则表达式 - 避免每次请求都重新编译
+var (
+	reEnclosure      = regexp.MustCompile(`(<enclosure\s+[^>]*?url=")([^"]+)`)
+	reItunesImage    = regexp.MustCompile(`(<itunes:image\s+[^>]*?href=")([^"]+)`)
+	reImageURL       = regexp.MustCompile(`(<image>[\s\S]*?<url>)([^<]+)(<\/url>)`)
+	reMediaThumbnail = regexp.MustCompile(`(<media:thumbnail\s+[^>]*?url=")([^"]+)`)
+	reMediaContent   = regexp.MustCompile(`<media:content\s+[^>]*?url="[^"]+"[^>]*>`)
+	reStylesheet     = regexp.MustCompile(`(<\?xml-stylesheet[^>]*href=")([^"]+)(")`)
+)
+
 func main() {
 	// 从环境变量读取 API Key
 	apiKey := os.Getenv("PODCAST_PROXY_APIKEY")
@@ -92,10 +110,7 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Set("User-Agent", "PodcastProxy/1.0")
  
-	client := http.Client{
-		Timeout: 30 * time.Second,
-	}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		http.Error(w, "获取源 RSS 失败: "+err.Error(), http.StatusBadGateway)
 		return
@@ -117,17 +132,7 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 	}
  
 	// 构造代理 URL 模板
-	scheme := "http"
-	if forceHTTPS {
-		scheme = "https"
-	} else if r.TLS != nil {
-		scheme = "https"
-	}
-	host := r.Host
-	// 如果设置了 PUBLIC_HOST 环境变量，则强制使用该域名
-	if publicHost := os.Getenv("PUBLIC_HOST"); publicHost != "" {
-		host = publicHost
-	}
+	scheme, host := getProxySchemeAndHost(r)
  
 	// helper to escape characters that would break an XML attribute value.
 	// after we switch to placing the key in the path there will be no unescaped
@@ -163,35 +168,30 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 	content := string(bodyBytes)
  
 	// 规则1: 替换 <enclosure url="...">
-	reEnclosure := regexp.MustCompile(`(<enclosure\s+[^>]*?url=")([^"]+)`)
 	content = reEnclosure.ReplaceAllStringFunc(content, func(match string) string {
 		parts := reEnclosure.FindStringSubmatch(match)
 		return parts[1] + proxyForAudio(parts[2])
 	})
- 
+	
 	// 规则2: 替换 <itunes:image href="...">
-	reItunesImage := regexp.MustCompile(`(<itunes:image\s+[^>]*?href=")([^"]+)`)
 	content = reItunesImage.ReplaceAllStringFunc(content, func(match string) string {
 		parts := reItunesImage.FindStringSubmatch(match)
 		return parts[1] + proxyForImage(parts[2])
 	})
- 
+	
 	// 规则3: 替换 <image><url>...</url></image>
-	reImageURL := regexp.MustCompile(`(<image>[\s\S]*?<url>)([^<]+)(<\/url>)`)
 	content = reImageURL.ReplaceAllStringFunc(content, func(match string) string {
 		parts := reImageURL.FindStringSubmatch(match)
 		return parts[1] + proxyForImage(strings.TrimSpace(parts[2])) + parts[3]
 	})
- 
+	
 	// 规则4: 替换 <media:thumbnail url="...">
-	reMediaThumbnail := regexp.MustCompile(`(<media:thumbnail\s+[^>]*?url=")([^"]+)`)
 	content = reMediaThumbnail.ReplaceAllStringFunc(content, func(match string) string {
 		parts := reMediaThumbnail.FindStringSubmatch(match)
 		return parts[1] + proxyForImage(parts[2])
 	})
- 
+	
 	// 规则5: 替换 <media:content url="...">
-	reMediaContent := regexp.MustCompile(`<media:content\s+[^>]*?url="[^"]+"[^>]*>`)
 	content = reMediaContent.ReplaceAllStringFunc(content, func(match string) string {
 		isAudio := strings.Contains(match, `type="audio/`)
 		isImage := strings.Contains(match, `type="image/`)
@@ -216,24 +216,21 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
  
 		urlAttrRegex := regexp.MustCompile(`(url=")([^"]+)`)
 		return urlAttrRegex.ReplaceAllStringFunc(match, func(attrMatch string) string {
-			parts := urlAttrRegex.FindStringSubmatch(attrMatch)
+		parts := urlAttrRegex.FindStringSubmatch(attrMatch)
 			return parts[1] + proxyFunc(parts[2])
 		})
 	})
  
-	// 规则4: 如果存在 <\?xml-stylesheet ... href="...">，则代理样式文件。
+	// 规则6: 如果存在 <\?xml-stylesheet ... href="...">，则代理样式文件。
 	// 样式文件单独通过 /style/ 路径，并可能使用独立端口。
-	reStylesheet := regexp.MustCompile(`(<\?xml-stylesheet[^>]*href=")([^"]+)(")`)
 	content = reStylesheet.ReplaceAllStringFunc(content, func(match string) string {
 		parts := reStylesheet.FindStringSubmatch(match)
 		return parts[1] + proxyForStyle(parts[2]) + parts[3]
 	})
 
-	// NOTE: we intentionally leave atom:link entries untouched so that
-	// everything except images/audio (and optional stylesheet) remains
-	// identical to the original feed.  pagination links etc. will therefore
-	// still point at the upstream domain; this is OK if you only want
-	// the media assets proxied.
+	// NOTE: atom:link 和分页链接保持不变，仍然指向原始源域名。
+	// 这样设计是为了让订阅器可以访问原始源的完整功能（如分页、搜索等）
+	// 代理的主要目的是处理媒体资源和样式
  
 	transformed := []byte(content)
 	// ---- 替换结束 ----
@@ -242,26 +239,20 @@ func feedHandler(w http.ResponseWriter, r *http.Request) {
 	forwardRSSHeaders(w, resp.Header)
  
 	// 设置自身的 Content-Type，并写出转换后的 RSS
-	w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
+	// 支持 display 参数：?display=1 时在浏览器显示，否则作为 RSS 源
+	contentType := "application/rss+xml; charset=utf-8"
+	if r.URL.Query().Get("display") == "1" {
+		contentType = "text/xml; charset=utf-8"
+	}
+	w.Header().Set("Content-Type", contentType)
 	w.WriteHeader(http.StatusOK)
 	w.Write(transformed)
 }
  
 // /audio?url=原始音频URL&apikey=密钥
 func audioHandler(w http.ResponseWriter, r *http.Request) {
-	// 认证：先尝试 query，再看 path
-	apikey := r.URL.Query().Get("apikey")
-	if apikey == "" {
-		if p := strings.TrimPrefix(r.URL.Path, "/audio/"); p != "" {
-			parts := strings.SplitN(p, "/", 2)
-			apikey = parts[0]
-		}
-	}
-	// request may contain encoded key; decode if so
-	if decoded, err := base64.StdEncoding.DecodeString(apikey); err == nil {
-		apikey = string(decoded)
-	}
-	if apikey != apiKeyEnv {
+	apikey, valid := extractAndVerifyAPIKey(r, "/audio/")
+	if !valid {
 		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
 		return
 	}
@@ -271,7 +262,6 @@ func audioHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "url 参数是必填项", http.StatusBadRequest)
 		return
 	}
-	// unescape xml entities left in the query
 	origURL = strings.ReplaceAll(origURL, "&amp;", "&")
 
 	req, err := http.NewRequest("GET", origURL, nil)
@@ -284,34 +274,17 @@ func audioHandler(w http.ResponseWriter, r *http.Request) {
 		req.Header.Set("Range", rangeHeader)
 	}
  
-	// create client that will not auto-follow redirects
-	client := http.Client{
-		Timeout: 30 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		http.Error(w, "获取音频失败: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	// if server responded with redirect, forward it (rewriting and
-	// re-encoding the location through our proxy)
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		loc := resp.Header.Get("Location")
 		if loc != "" {
-			scheme := "http"
-			if forceHTTPS || r.TLS != nil {
-				scheme = "https"
-			}
-			host := r.Host
-			if publicHost := os.Getenv("PUBLIC_HOST"); publicHost != "" {
-				host = publicHost
-			}
-			// construct new proxy location; key is already decoded earlier
+			scheme, host := getProxySchemeAndHost(r)
 			encoded := base64.StdEncoding.EncodeToString([]byte(apikey))
 			newLoc := fmt.Sprintf("%s://%s/audio/%s?url=%s",
 				scheme, host, url.PathEscape(encoded), url.QueryEscape(loc))
@@ -327,18 +300,8 @@ func audioHandler(w http.ResponseWriter, r *http.Request) {
  
 // /image?url=原始图片URL&apikey=密钥
 func imageHandler(w http.ResponseWriter, r *http.Request) {
-	// 认证：允许通过 path 提供 key
-	apikey := r.URL.Query().Get("apikey")
-	if apikey == "" {
-		if p := strings.TrimPrefix(r.URL.Path, "/image/"); p != "" {
-			parts := strings.SplitN(p, "/", 2)
-			apikey = parts[0]
-		}
-	}
-	if decoded, err := base64.StdEncoding.DecodeString(apikey); err == nil {
-		apikey = string(decoded)
-	}
-	if apikey != apiKeyEnv {
+	apikey, valid := extractAndVerifyAPIKey(r, "/image/")
+	if !valid {
 		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
 		return
 	}
@@ -357,13 +320,7 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Set("User-Agent", "PodcastProxy/1.0")
  
-	client := http.Client{
-		Timeout: 30 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		http.Error(w, "获取图片失败: "+err.Error(), http.StatusBadGateway)
 		return
@@ -373,14 +330,7 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		loc := resp.Header.Get("Location")
 		if loc != "" {
-			scheme := "http"
-			if forceHTTPS || r.TLS != nil {
-				scheme = "https"
-			}
-			host := r.Host
-			if publicHost := os.Getenv("PUBLIC_HOST"); publicHost != "" {
-				host = publicHost
-			}
+			scheme, host := getProxySchemeAndHost(r)
 			encoded := base64.StdEncoding.EncodeToString([]byte(apikey))
 			newLoc := fmt.Sprintf("%s://%s/image/%s?url=%s",
 				scheme, host, url.PathEscape(encoded), url.QueryEscape(loc))
@@ -397,18 +347,8 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 // /style?url=原始样式URL&apikey=密钥
 // 这个处理器和 imageHandler 几乎一样
 func styleHandler(w http.ResponseWriter, r *http.Request) {
-	// 认证：允许通过 path 提供 key
-	apikey := r.URL.Query().Get("apikey")
-	if apikey == "" {
-		if p := strings.TrimPrefix(r.URL.Path, "/style/"); p != "" {
-			parts := strings.SplitN(p, "/", 2)
-			apikey = parts[0]
-		}
-	}
-	if decoded, err := base64.StdEncoding.DecodeString(apikey); err == nil {
-		apikey = string(decoded)
-	}
-	if apikey != apiKeyEnv {
+apikey, valid := extractAndVerifyAPIKey(r, "/style/")
+	if !valid {
 		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
 		return
 	}
@@ -427,13 +367,7 @@ func styleHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Set("User-Agent", "PodcastProxy/1.0")
  
-	client := http.Client{
-		Timeout: 30 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		http.Error(w, "获取样式失败: "+err.Error(), http.StatusBadGateway)
 		return
@@ -443,14 +377,7 @@ func styleHandler(w http.ResponseWriter, r *http.Request) {
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		loc := resp.Header.Get("Location")
 		if loc != "" {
-			scheme := "http"
-			if forceHTTPS || r.TLS != nil {
-				scheme = "https"
-			}
-			host := r.Host
-			if publicHost := os.Getenv("PUBLIC_HOST"); publicHost != "" {
-				host = publicHost
-			}
+			scheme, host := getProxySchemeAndHost(r)
 			encoded := base64.StdEncoding.EncodeToString([]byte(apikey))
 			newLoc := fmt.Sprintf("%s://%s/style/%s?url=%s",
 				scheme, host, url.PathEscape(encoded), url.QueryEscape(loc))
@@ -464,6 +391,38 @@ func styleHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, resp.Body)
 }
  
+// 提取 API Key 认证逻辑
+func extractAndVerifyAPIKey(r *http.Request, pathPrefix string) (string, bool) {
+	// 优先从 query 参数获取
+	apikey := r.URL.Query().Get("apikey")
+	if apikey == "" && pathPrefix != "" {
+		// 如果没有 query 参数，从 path 中提取
+		if p := strings.TrimPrefix(r.URL.Path, pathPrefix); p != "" {
+			parts := strings.SplitN(p, "/", 2)
+			apikey = parts[0]
+		}
+	}
+	// 如果 key 是 base64 编码，进行解码
+	if decoded, err := base64.StdEncoding.DecodeString(apikey); err == nil {
+		apikey = string(decoded)
+	}
+	// 验证 key
+	return apikey, apikey == apiKeyEnv
+}
+
+// 获取代理的 scheme 和 host
+func getProxySchemeAndHost(r *http.Request) (string, string) {
+	scheme := "http"
+	if forceHTTPS || r.TLS != nil {
+		scheme = "https"
+	}
+	host := r.Host
+	if publicHost := os.Getenv("PUBLIC_HOST"); publicHost != "" {
+		host = publicHost
+	}
+	return scheme, host
+}
+
 // helper：把源响应头透传到目标响应
 func copyHeader(dst http.ResponseWriter, src http.Header) {
 	for k, vv := range src {
