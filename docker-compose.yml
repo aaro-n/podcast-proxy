@@ -2,9 +2,19 @@ services:
   podcast-proxy:
     build:
       context: .
-    image: podcast-proxy
+      dockerfile: Dockerfile
+    image: podcast-proxy:latest
     container_name: podcast-proxy
     environment:
-      API_KEY: "5555"
+      PODCAST_PROXY_APIKEY: "test-key-12345"
+      PORT: "8080"
+      FORCE_HTTPS: "false"
     ports:
       - "8080:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

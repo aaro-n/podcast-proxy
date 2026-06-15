@@ -3,13 +3,14 @@ FROM golang:1.21-alpine AS builder
 
 WORKDIR /app
 
-# 关键改动：将 main.go 替换为 *.go，以复制所有 Go 源文件
+# 复制 go.mod 和其他 Go 源文件
+COPY go.mod ./
 COPY *.go ./
 
-# 在容器内自动初始化一个模块，以满足现代 Go 的构建要求
-RUN go mod init podcast-proxy
+# 下载依赖
+RUN go mod download || true
 
-# 构建命令 go build . 会自动找到当前目录下的所有 .go 文件并一起编译
+# 构建二进制文件
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /podcast-proxy .
 
 # --- Stage 2: Final Image ---
