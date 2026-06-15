@@ -70,13 +70,7 @@
 - RegisterRoutes() - 路由注册
 - 日志、CORS、压缩中间件
 
-### 11. web.go (200 行)
-**Web界面** - 用户界面和生成器
-- WebHandler - Web请求处理
-- 现代化响应式设计
-- 一键复制功能
-
-### 12. go.mod (10 行)
+### 11. go.mod (10 行)
 **模块文件** - Go模块配置
 - 模块名: github.com/podcast-proxy
 - Go版本: 1.21
@@ -194,7 +188,6 @@ Markdown       6    ~2800    -        -
 | HTTP代理 | proxy.go | ProxyRequest, ProxyResponse |
 | 请求处理 | handlers.go | *Handler (Feed/Audio/Image/Style) |
 | 服务器 | server.go | Server, RegisterRoutes |
-| Web界面 | web.go | WebHandler |
 | 工具函数 | utils.go | ProxyURLBuilder, LoggerHelper |
 | 数据模型 | models.go | ProxyConfig, ProxyResource |
 
@@ -209,7 +202,6 @@ Markdown       6    ~2800    -        -
 | 认证验证 | auth.go | AuthManager |
 | URL构建 | utils.go | ProxyURLBuilder |
 | 日志记录 | utils.go | LoggerHelper |
-| Web UI | web.go | WebHandler |
 
 ## 核心数据流
 
@@ -347,7 +339,7 @@ cache.go
 
 ```
 podcast-proxy/
-├── [核心代码 - 12个Go文件]
+├── [核心代码 - 11个Go文件]
 │   ├── main.go              (20行)   - 程序入口
 │   ├── config.go            (60行)   - 配置管理
 │   ├── auth.go              (80行)   - 认证系统
@@ -358,15 +350,15 @@ podcast-proxy/
 │   ├── proxy.go             (180行)  - HTTP代理
 │   ├── handlers.go          (300行)  - 请求处理
 │   ├── server.go            (150行)  - 服务器配置
-│   ├── web.go               (200行)  - Web界面
 │   └── go.mod               (10行)   - 模块配置
 │
-├── [文档文件 - 6个Markdown文件]
+├── [文档文件 - 7个Markdown文件]
 │   ├── README.md            (400行)  - 主说明
 │   ├── ARCHITECTURE.md      (500行)  - 架构设计
 │   ├── DEVELOPMENT.md       (600行)  - 开发指南
 │   ├── USAGE.md             (500行)  - 使用示例
 │   ├── SUMMARY.md           (400行)  - 项目总结
+│   ├── ETAG_AND_RSS_DESIGN.md (300行)- 缓存设计
 │   └── FILES.md             (本文件) - 文件清单
 │
 ├── [配置文件]

@@ -12,17 +12,18 @@ export FORCE_HTTPS="false"
 go run .
 ```
 
-### 2. 在Web界面生成链接
+### 2. 生成代理链接
 
-打开浏览器访问 `http://localhost:8080/`
+由于系统保持 API 轻量，您可以直接通过拼接 URL 参数或使用脚本生成代理链接。
 
-输入：
-- **原始RSS地址**: `https://example.com/podcast/feed.xml`
-- **API Key**: `my-secret-key`
-
-点击"生成代理链接"，得到类似：
+格式为：
 ```
-http://localhost:8080/feed?url=https://example.com/podcast/feed.xml&apikey=my-secret-key
+http://localhost:8080/feed?url={原始RSS源的编码URL}&apikey={您的API_KEY}
+```
+
+例如：
+```
+http://localhost:8080/feed?url=https%3A%2F%2Fexample.com%2Fpodcast%2Ffeed.xml&apikey=my-secret-key
 ```
 
 ### 3. 在播客客户端中使用

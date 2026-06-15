@@ -208,20 +208,6 @@
 - `CORSMiddleware` - CORS中间件（可选）
 - `CompressionMiddleware` - 压缩中间件（可选）
 
-### 11. **web.go** - Web界面
-**职责**: 用户界面和生成器
-
-**主要类**:
-- `WebHandler` - Web处理器
-  - 渲染HTML
-  - 提供Web UI
-
-**特点**:
-- 现代化UI设计
-- 实时验证
-- 一键复制
-- 响应式设计
-
 ## 数据流
 
 ### RSS源转换流程
@@ -266,26 +252,18 @@ AudioHandler.Handle()
   └─ 写入响应体
 ```
 
-### 缓存流程（ETag）
+### 缓存流程（ETag 直接转发）
 
 ```
-客户端请求
+客户端请求 (带 If-None-Match)
   ↓
-检查If-None-Match头
+FeedHandler (直接在 ProxyRequest 中转发缓存头给源站)
   ↓
-查询缓存 (CacheManager)
+源站进行缓存决策
   ↓
-ETag匹配?
-  ├─ 是 → 返回304 Not Modified
-  └─ 否 → 继续处理
-  ↓
-获取源资源
-  ↓
-生成ETag (ETagHelper)
-  ↓
-存储到缓存 (CacheManager)
-  ↓
-返回资源 + ETag头
+源站返回 304?
+  ├─ 是 → 代理直接转发 304 给客户端 (0 字节，极速短路)
+  └─ 否 (返回 200) → 接收新内容 → 转换 RSS → 将源站 ETag 附加在响应头 → 返回给客户端 (客户端更新本地缓存)
 ```
 
 ## 扩展点

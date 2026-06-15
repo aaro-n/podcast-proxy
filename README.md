@@ -5,12 +5,11 @@
 ## 功能特性
 
 ✅ **RSS源转换** - 自动将播客源中的所有媒体URL转换为代理地址
-✅ **智能缓存** - 支持ETag和HTTP缓存控制，减轻源站压力
+✅ **智能缓存** - 转发并使用源站的 ETag 进行缓存决策，支持 304 Not Modified
 ✅ **快速跳转** - 完整支持HTTP Range请求，用于音频快速跳转
-✅ **流量节省** - 支持If-None-Match条件请求，避免重复传输
+✅ **流量节省** - 支持If-None-Match条件请求，直接转发给源站决定缓存
 ✅ **完整认证** - API Key认证，支持Base64编码
 ✅ **模块化架构** - 清晰的代码结构，易于扩展和维护
-✅ **Web生成器** - 在线生成代理链接的便捷界面
 ✅ **多资源类型** - 支持音频、图片、样式表等多种资源代理
 
 ## 项目结构
@@ -27,7 +26,6 @@ podcast-proxy/
 ├── proxy.go             # HTTP代理逻辑
 ├── handlers.go          # HTTP处理器
 ├── server.go            # HTTP服务器
-├── web.go               # Web UI
 ├── Dockerfile           # Docker配置
 ├── docker-compose.yml   # Docker Compose
 ├── go.mod              # Go模块
@@ -70,9 +68,9 @@ docker-compose up -d
 
 ## API 使用
 
-### 1. 生成代理链接 (Web界面)
+### 1. 链接格式说明
 
-访问 `http://localhost:8080/`，输入原始RSS源URL和API Key，生成代理链接。
+因为已移除了 Web 生成器界面（以保持系统专注在核心 API 的轻量级和安全性），代理链接现在可以直接通过 API 格式或者脚本生成。
 
 ### 2. 获取代理RSS源
 
@@ -118,22 +116,20 @@ GET /style/{base64-encoded-api-key}?url={样式URL}
 
 ## 缓存策略
 
-### ETag缓存
+### ETag缓存 (直接转发源站决策)
 
-代理服务器会自动提取源响应的ETag，当客户端发送If-None-Match请求时：
+为了确保 100% 的语义一致性以及对缓存代理的绝对合规，本系统**直接使用并透传源站的 ETag 标签**，由源站决定缓存是否有效：
+
+1. 当客户端带 `If-None-Match` 请求时，代理服务器自动在 `ProxyRequest` 中将此头透传给源站。
+2. 若源站返回 `304 Not Modified`，代理服务器将直接短路，返回 `304` 给客户端。**整个过程 0 字节传输且无额外 XML 解析计算，性能极高**。
+3. 若源站返回 `200 OK`，则代表内容有更新，代理重新翻译 RSS 并将新的源站 ETag 附加在响应中，供下一次缓存使用。
 
 ```
-请求: GET /audio/xxx?url=...
+请求: GET /feed?url=...&apikey=...
       If-None-Match: "abc123"
 
-响应: 304 Not Modified （如果ETag匹配）
+响应: 304 Not Modified （源站匹配并返回 304）
 ```
-
-### 本地缓存
-
-- 缓存TTL: 24小时
-- 自动清理过期条目
-- 基于URL哈希的缓存键
 
 ## 快速跳转（Range请求）
 

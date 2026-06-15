@@ -27,7 +27,6 @@
    - ✓ API认证系统
    - ✓ 错误处理和日志
    - ✓ 重定向处理
-   - ✓ Web UI生成器
 
 ✅ **5. 优化建议（已文档化）**
    - ✓ 性能优化方案
@@ -51,7 +50,6 @@
   ├─ proxy.go          (180行)     - HTTP代理
   ├─ handlers.go       (300行)     - 请求处理
   ├─ server.go         (150行)     - 服务器
-  ├─ web.go            (200行)     - Web界面
   └─ go.mod            (10行)      - 模块文件
 
 📚 文档 (Markdown)
@@ -79,9 +77,6 @@ export PODCAST_PROXY_APIKEY="my-secret-key"
 
 # 运行程序
 go run .
-
-# 访问Web界面
-# 浏览器打开: http://localhost:8080
 ```
 
 ### 方式2: Docker运行
@@ -95,24 +90,22 @@ docker run -e PODCAST_PROXY_APIKEY="my-secret-key" -p 8080:8080 podcast-proxy
 
 ```bash
 docker-compose up -d
-# 访问: http://localhost:8080
 ```
 
 
 使用流程
 ========
 
-1️⃣  打开 http://localhost:8080
+1️⃣  准备你要代理的原始播客 RSS 源（例如：`https://example.com/podcast/feed.xml`）。
 
-2️⃣  输入:
-   - 原始RSS源URL: https://example.com/podcast/feed.xml
-   - API Key: my-secret-key
+2️⃣  准备你的 API Key（例如：`my-secret-key`）。
 
-3️⃣  点击"生成代理链接"
+3️⃣  手动或使用脚本拼接你的代理链接：
+   `http://your-proxy-host:8080/feed?url=https://example.com/podcast/feed.xml&apikey=my-secret-key`
 
-4️⃣  复制生成的链接
+4️⃣  复制该链接。
 
-5️⃣  在播客应用中添加自定义源
+5️⃣  在播客应用（如 Apple Podcasts、Overcast、Pocket Casts）中添加自定义 URL 源。
 
 ✅ 完成！开始享受加速播放
 
@@ -126,7 +119,7 @@ docker-compose up -d
 
 🔊  音频代理
    - 支持快速跳转 (Range请求)
-   - 支持ETag缓存 (304 Not Modified)
+   - 支持直接转发/透传源站 ETag 缓存标签 (实现 304 Not Modified 直接短路)
    - 流式处理大文件
 
 📸  图片和样式代理
@@ -138,14 +131,9 @@ docker-compose up -d
    - Base64编码支持
 
 📊  缓存管理
-   - ETag自动生成
-   - 24小时TTL
-   - 自动过期清理
-
-🌐  Web界面
-   - 在线生成代理链接
-   - 一键复制
-   - 响应式设计
+   - 与源站直接进行 ETag 缓存协商
+   - 避免在代理服务器多余计算或存储
+   - 源站未发生改变时，返回 304 且 0 字节传输
 
 
 性能指标
