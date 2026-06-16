@@ -1,15 +1,21 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
 // Server 服务器
 type Server struct {
 	config    *ProxyConfig
 	mux       *http.ServeMux
+	httpServer *http.Server
 }
 
 // NewServer 创建服务器
@@ -22,6 +28,13 @@ func NewServer(cfg *ProxyConfig) *Server {
 
 // RegisterRoutes 注册路由
 func (s *Server) RegisterRoutes() {
+	// 健康检查
+	s.mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+
 	// 饲送处理
 	s.mux.HandleFunc("/feed", func(w http.ResponseWriter, r *http.Request) {
 		handler := NewFeedHandler(r)
@@ -60,25 +73,53 @@ func (s *Server) RegisterRoutes() {
 
 	// 根路由 - 所有请求返回404
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		handler := NewNotFoundHandler(r)
-		handler.Handle(w, r)
+		if r.URL.Path != "/" {
+			handler := NewNotFoundHandler(r)
+			handler.Handle(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"service":"podcast-proxy","version":"2.0"}`))
 	})
 
 	log.Println("路由注册完成")
 }
 
-// Start 启动服务器
-func (s *Server) Start() error {
-	addr := fmt.Sprintf(":%s", s.config.Port)
-	log.Printf("服务启动 - 监听 %s", addr)
-	return http.ListenAndServe(addr, s.mux)
-}
-
-// StartWithMiddleware 带中间件启动服务器
+// StartWithMiddleware 带中间件启动服务器（支持优雅关闭）
 func (s *Server) StartWithMiddleware() error {
 	addr := fmt.Sprintf(":%s", s.config.Port)
-	log.Printf("服务启动 - 监听 %s (带中间件)", addr)
-	return http.ListenAndServe(addr, logMiddleware(s.mux))
+
+	s.httpServer = &http.Server{
+		Addr:    addr,
+		Handler: logMiddleware(s.mux),
+	}
+
+	// 启动信号监听（用于优雅关闭）
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		log.Printf("服务启动 - 监听 %s (带中间件)", addr)
+		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("服务启动失败: %v", err)
+		}
+	}()
+
+	// 等待中断信号
+	sig := <-quit
+	log.Printf("收到信号 %v，正在优雅关闭服务...", sig)
+
+	// 设置5秒超时关闭
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := s.httpServer.Shutdown(ctx); err != nil {
+		return fmt.Errorf("优雅关闭失败: %w", err)
+	}
+
+	log.Println("服务已安全关闭")
+	return nil
 }
 
 // logMiddleware 日志中间件
@@ -117,28 +158,4 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 		rw.written = true
 	}
 	return rw.ResponseWriter.Write(b)
-}
-
-// CORSMiddleware CORS中间件（可选）
-func CORSMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
-}
-
-// CompressionMiddleware 压缩中间件（可选）
-func CompressionMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 这里可以添加gzip压缩逻辑
-		next.ServeHTTP(w, r)
-	})
 }

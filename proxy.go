@@ -115,11 +115,13 @@ func (pr *ProxyResponse) WriteResponse(w http.ResponseWriter, srcReq *http.Reque
 	defer pr.sourceResp.Body.Close()
 
 	// 复制响应头（排除不适合的头）
+	// 注意：不排除 Content-Length，因为 206 Partial Content 响应中
+	// Content-Length + Content-Range 是客户端正确处理 Range 请求的必要头
 	hc := NewHeaderCopier(w, pr.sourceResp.Header)
 	hc.CopyExcept([]string{
 		"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
 		"Te", "Trailers", "Transfer-Encoding", "Upgrade",
-		"Content-Length", "Content-Encoding",
+		"Content-Encoding",
 	})
 
 	// 设置状态码
@@ -153,59 +155,4 @@ func (pr *ProxyResponse) HandleRedirect(w http.ResponseWriter, srcReq *http.Requ
 	}
 
 	return false, nil
-}
-
-// StreamRequest 流式请求助手（用于处理Range和大文件）
-type StreamRequest struct {
-	client *http.Client
-}
-
-// NewStreamRequest 创建流式请求
-func NewStreamRequest() *StreamRequest {
-	return &StreamRequest{
-		client: GetHTTPClient().GetClient(),
-	}
-}
-
-// Stream 执行流式请求
-// 支持Range请求用于快速跳转和节省流量
-func (sr *StreamRequest) Stream(originalURL string, sourceReq *http.Request,
-	onChunk func(chunk []byte) error) error {
-	
-	req, err := http.NewRequest("GET", originalURL, nil)
-	if err != nil {
-		return err
-	}
-
-	req.Header.Set("User-Agent", "PodcastProxy/2.0")
-
-	// 转发Range请求头
-	if rangeHeader := sourceReq.Header.Get("Range"); rangeHeader != "" {
-		req.Header.Set("Range", rangeHeader)
-	}
-
-	resp, err := sr.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	// 分块读取和处理数据
-	chunk := make([]byte, 8*1024) // 8KB缓冲区
-	for {
-		n, err := resp.Body.Read(chunk)
-		if n > 0 {
-			if err := onChunk(chunk[:n]); err != nil {
-				return err
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
 }

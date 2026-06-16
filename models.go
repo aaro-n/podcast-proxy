@@ -9,13 +9,6 @@ type ProxyConfig struct {
 	Timeout     int // 秒
 }
 
-// RequestContext 请求上下文
-type RequestContext struct {
-	APIKey  string
-	OrigURL string
-	Path    string
-}
-
 // ProxyResource 代理资源类型
 type ProxyResource string
 
@@ -26,9 +19,4 @@ const (
 	ResourceFeed  ProxyResource = "feed"
 )
 
-// FeedTransformResult RSS转换结果
-type FeedTransformResult struct {
-	Content     []byte
-	ContentType string
-	Headers     map[string]string
-}
+

@@ -2,7 +2,9 @@ package main
 
 import (
 	"io"
+	"log"
 	"net/http"
+	"time"
 )
 
 // HandlerBase 处理器基类
@@ -22,9 +24,8 @@ func newHandlerBase(r *http.Request) *HandlerBase {
 // FeedHandler 饲送处理器
 type FeedHandler struct {
 	*HandlerBase
-	validator  *FeedValidator
+	validator   *FeedValidator
 	transformer *FeedTransformer
-	metadata   *FeedMetadata
 }
 
 // NewFeedHandler 创建饲送处理器
@@ -33,7 +34,6 @@ func NewFeedHandler(r *http.Request) *FeedHandler {
 		HandlerBase: newHandlerBase(r),
 		validator:   &FeedValidator{},
 		transformer: NewFeedTransformer(),
-		metadata:    &FeedMetadata{},
 	}
 }
 
@@ -106,6 +106,12 @@ func (fh *FeedHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	builder := NewProxyURLBuilder(r)
 	transformed := fh.transformer.Transform(content, builder, apikey)
 
+	// 验证转换后的RSS是否为有效XML
+	if err := fh.validator.ValidateTransformedFeed(transformed); err != nil {
+		// 验证失败时记录警告，但仍返回内容（保证可用性优先）
+		log.Printf("[WARN] 转换后的RSS XML验证失败: %v", err)
+	}
+
 	// 设置响应头
 	contentType := "application/rss+xml; charset=utf-8"
 	if r.URL.Query().Get("display") == "1" {
@@ -134,16 +140,14 @@ func (fh *FeedHandler) Handle(w http.ResponseWriter, r *http.Request) {
 // AudioHandler 音频处理器
 type AudioHandler struct {
 	*HandlerBase
-	cacheManager *CacheManager
-	sh           *StringHelper
+	sh *StringHelper
 }
 
 // NewAudioHandler 创建音频处理器
 func NewAudioHandler(r *http.Request) *AudioHandler {
 	return &AudioHandler{
 		HandlerBase: newHandlerBase(r),
-		cacheManager: getCacheManager(),
-		sh: &StringHelper{},
+		sh:          &StringHelper{},
 	}
 }
 
@@ -197,16 +201,14 @@ func (ah *AudioHandler) Handle(w http.ResponseWriter, r *http.Request) {
 // ImageHandler 图片处理器
 type ImageHandler struct {
 	*HandlerBase
-	cacheManager *CacheManager
-	sh           *StringHelper
+	sh *StringHelper
 }
 
 // NewImageHandler 创建图片处理器
 func NewImageHandler(r *http.Request) *ImageHandler {
 	return &ImageHandler{
 		HandlerBase: newHandlerBase(r),
-		cacheManager: getCacheManager(),
-		sh: &StringHelper{},
+		sh:          &StringHelper{},
 	}
 }
 
@@ -340,16 +342,7 @@ var _cacheManager *CacheManager
 
 func getCacheManager() *CacheManager {
 	if _cacheManager == nil {
-		_cacheManager = NewCacheManager(24 * 3600 * 1000000000) // 24小时
+		_cacheManager = NewCacheManager(24 * time.Hour)
 	}
 	return _cacheManager
-}
-
-// 简化的处理器包装
-func wrapHandler(handler interface {
-	Handle(http.ResponseWriter, *http.Request)
-}) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		handler.Handle(w, r)
-	}
 }

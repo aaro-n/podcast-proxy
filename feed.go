@@ -27,8 +27,6 @@ func NewFeedTransformer() *FeedTransformer {
 			"media_content": regexp.MustCompile(`<media:content\s+[^>]*?url="[^"]+"[^>]*>`),
 			// XML样式表：<?xml-stylesheet href="..." ?>
 			"stylesheet": regexp.MustCompile(`(<\?xml-stylesheet[^>]*href=")([^"]+)(")>`),
-			// 链接标签（atom）
-			"atom_link": regexp.MustCompile(`(<link\s+[^>]*?href=")([^"]+)`),
 		},
 	}
 }
@@ -52,9 +50,6 @@ func (ft *FeedTransformer) Transform(content string, builder *ProxyURLBuilder, a
 
 	// 6. 替换xml-stylesheet
 	content = ft.replaceStylesheet(content, builder, apikey)
-
-	// 7. 替换atom:link中的相对URL（可选，默认保持原始）
-	// 这样可以让客户端直接访问原始源的分页等功能
 
 	return content
 }
@@ -221,35 +216,4 @@ func (*FeedValidator) ValidateTransformedFeed(content string) error {
 	return nil
 }
 
-// FeedMetadata RSS元数据提取器
-type FeedMetadata struct{}
 
-// ExtractTitle 提取RSS标题
-func (*FeedMetadata) ExtractTitle(content string) string {
-	regex := regexp.MustCompile(`<title>([^<]+)</title>`)
-	matches := regex.FindStringSubmatch(content)
-	if len(matches) > 1 {
-		return matches[1]
-	}
-	return ""
-}
-
-// ExtractDescription 提取RSS描述
-func (*FeedMetadata) ExtractDescription(content string) string {
-	regex := regexp.MustCompile(`<description>([^<]+)</description>`)
-	matches := regex.FindStringSubmatch(content)
-	if len(matches) > 1 {
-		return matches[1]
-	}
-	return ""
-}
-
-// ExtractLastBuildDate 提取RSS最后构建时间
-func (*FeedMetadata) ExtractLastBuildDate(content string) string {
-	regex := regexp.MustCompile(`<lastBuildDate>([^<]+)</lastBuildDate>`)
-	matches := regex.FindStringSubmatch(content)
-	if len(matches) > 1 {
-		return matches[1]
-	}
-	return ""
-}

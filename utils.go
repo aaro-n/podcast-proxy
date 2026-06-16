@@ -192,44 +192,4 @@ func (*StringHelper) IsImageURL(u string) bool {
 	return false
 }
 
-// IsAudioURL 判断是否是音频URL
-func (*StringHelper) IsAudioURL(u string) bool {
-	u = strings.ToLower(u)
-	audioExts := []string{".mp3", ".m4a", ".aac", ".ogg", ".wav", ".flac"}
-	for _, ext := range audioExts {
-		if strings.HasSuffix(u, ext) {
-			return true
-		}
-	}
-	return false
-}
 
-// RangeHelper Range请求助手
-type RangeHelper struct{}
-
-// ParseRange 解析Range请求头
-// 返回 (start, end, total, ok)
-func (*RangeHelper) ParseRange(rangeHeader string, contentLength int64) (int64, int64, int64, bool) {
-	if rangeHeader == "" {
-		return 0, contentLength - 1, contentLength, false
-	}
-
-	// 简单解析，格式：bytes=start-end
-	if strings.HasPrefix(rangeHeader, "bytes=") {
-		spec := strings.TrimPrefix(rangeHeader, "bytes=")
-		parts := strings.Split(spec, "-")
-		if len(parts) == 2 {
-			// bytes=0-100
-			if parts[0] != "" && parts[1] != "" {
-				var start, end int64
-				fmt.Sscanf(parts[0], "%d", &start)
-				fmt.Sscanf(parts[1], "%d", &end)
-				if start >= 0 && end >= start && end < contentLength {
-					return start, end, contentLength, true
-				}
-			}
-		}
-	}
-
-	return 0, contentLength - 1, contentLength, false
-}
