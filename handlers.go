@@ -1,9 +1,12 @@
 package main
 
 import (
+	"crypto/sha1"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -49,6 +52,17 @@ func (fh *FeedHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ⭐️ 如果客户端请求携带的是我们本地生成的 ETag（带有 "pp-hash-" 前缀），
+	// 我们首先需要备份这个本地 ETag，并在发送代理请求前将其从 If-None-Match 报头中移除。
+	// 这样做是为了避免将其透传给源站（源站无法识别我们自定义的本地哈希，会导致源站始终返回 200）。
+	// 只有当客户端携带的是源站原生的 ETag 时，才予以保留并透传给源站，由源站来进行缓存验证。
+	clientLocalETag := ""
+	ifNoneMatch := r.Header.Get("If-None-Match")
+	if strings.HasPrefix(ifNoneMatch, `W/"pp-hash-`) || strings.HasPrefix(ifNoneMatch, `"pp-hash-`) {
+		clientLocalETag = ifNoneMatch
+		r.Header.Del("If-None-Match")
+	}
+
 	// 获取源URL
 	feedURL := r.URL.Query().Get("url")
 	if !fh.validator.ValidateFeedURL(feedURL) {
@@ -67,7 +81,7 @@ func (fh *FeedHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// ⭐️ 如果源站返回304 Not Modified，直接转发给客户端
+	// ⭐️ 如果源站返回304 Not Modified，直接转发给客户端（仅针对源站自带ETag的场景）
 	if resp.StatusCode == http.StatusNotModified {
 		// 复制源站的响应头
 		hc := NewHeaderCopier(w, resp.Header)
@@ -115,24 +129,44 @@ func (fh *FeedHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// 设置响应头
 	// 为了让直接在浏览器中访问的访客能够触发并渲染 xml-stylesheet 样式表，
 	// 我们将默认的 Content-Type 设为大多数现代浏览器都能触发 XSL 渲染的 application/xml; charset=utf-8。
-	// 所有主流播客客户端（小宇宙、Apple Podcasts 等）对该 Content-Type 同样能够完美识别和无缝解析。
+	// 所有主流播客客户端（小宇宙、Apple Podcasts 等）对该 Content-Type 同样能够完美识别 and 无缝解析。
 	contentType := "application/xml; charset=utf-8"
 
 	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=86400") // 允许缓存1天
 
-	// ⭐️ 直接使用源站的ETag - 由源站决定缓存有效性
-	// 这样做的好处:
-	// 1. 源站控制缓存策略
-	// 2. 客户端下次请求时带上 If-None-Match: sourceETag
-	// 3. 我们转发给源站，源站返回 304 → 直接转发 304 (上面已处理)
-	// 4. 源站返回 200 → 我们重新生成转换后的 RSS
-	if sourceETag := resp.Header.Get("ETag"); sourceETag != "" {
+	// ⭐️ 区别化缓存验证方案 (分源站 ETag 确认 vs 本地内容哈希 ETag 确认)
+	sourceETag := resp.Header.Get("ETag")
+	if sourceETag != "" {
+		// 方案 A: 源站提供了原生 ETag。
+		// 直接沿用源站的 ETag。
+		// 下次客户端访问携带此 ETag 时，If-None-Match 会被原样透传发送到源站，由源站来确认并响应 304。
 		w.Header().Set("ETag", sourceETag)
-	}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(transformed))
+	} else {
+		// 方案 B: 源站没有提供任何 ETag。
+		// 我们通过对“转换重构后”的 RSS 文本内容计算 SHA-1 强哈希，并打上我们专属的前缀 `pp-hash-`
+		// 以防与未来的源站 ETag 命名冲突。
+		hasher := sha1.New()
+		hasher.Write([]byte(transformed))
+		localETag := fmt.Sprintf(`W/"pp-hash-%x"`, hasher.Sum(nil))
 
-	w.Header().Set("Cache-Control", "public, max-age=86400") // 允许缓存1天（由ETag决定更新）
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(transformed))
+		w.Header().Set("ETag", localETag)
+
+		// 检查客户端请求中是否携带了我们之前备份的本地 ETag
+		if clientLocalETag != "" {
+			// 支持强 ETag 和弱 ETag（带 W/ 前缀）的精确匹配
+			if clientLocalETag == localETag || strings.TrimPrefix(clientLocalETag, "W/") == strings.TrimPrefix(localETag, "W/") {
+				w.WriteHeader(http.StatusNotModified)
+				fh.logger.LogComplete(http.StatusNotModified)
+				return
+			}
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(transformed))
+	}
 
 	fh.logger.LogComplete(http.StatusOK)
 }
