@@ -9,14 +9,23 @@ import (
 
 // HTTPClientManager HTTP客户端管理器
 type HTTPClientManager struct {
-	client *http.Client
-	mu     sync.Mutex
+	client           *http.Client
+	noRedirectClient *http.Client
+	mu               sync.Mutex
 }
 
 // init 初始化HTTP客户端
 func (hm *HTTPClientManager) init(timeout time.Duration) {
 	hm.mu.Lock()
 	defer hm.mu.Unlock()
+
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     90 * time.Second,
+		// 支持Range请求
+		DisableCompression: false,
+	}
 
 	if hm.client == nil {
 		hm.client = &http.Client{
@@ -28,18 +37,23 @@ func (hm *HTTPClientManager) init(timeout time.Duration) {
 				}
 				return nil
 			},
-			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 100,
-				IdleConnTimeout:     90 * time.Second,
-				// 支持Range请求
-				DisableCompression: false,
+			Transport: transport,
+		}
+	}
+
+	if hm.noRedirectClient == nil {
+		hm.noRedirectClient = &http.Client{
+			Timeout: timeout,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				// 遇到重定向时立即停止跟随，并直接返回最后的3xx重定向响应
+				return http.ErrUseLastResponse
 			},
+			Transport: transport,
 		}
 	}
 }
 
-// GetClient 获取HTTP客户端
+// GetClient 获取自动随重定向的HTTP客户端
 func (hm *HTTPClientManager) GetClient() *http.Client {
 	hm.mu.Lock()
 	defer hm.mu.Unlock()
@@ -51,6 +65,18 @@ func (hm *HTTPClientManager) GetClient() *http.Client {
 	return hm.client
 }
 
+// GetNoRedirectClient 获取不随重定向的HTTP客户端
+func (hm *HTTPClientManager) GetNoRedirectClient() *http.Client {
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
+
+	if hm.noRedirectClient == nil {
+		hm.init(time.Duration(GetConfig().Timeout) * time.Second)
+	}
+
+	return hm.noRedirectClient
+}
+
 // ProxyRequest 代理请求助手
 type ProxyRequest struct {
 	originalURL string
@@ -60,10 +86,19 @@ type ProxyRequest struct {
 
 // NewProxyRequest 创建代理请求
 func NewProxyRequest(originalURL string, resourceType string) *ProxyRequest {
+	var client *http.Client
+	if resourceType == string(ResourceFeed) {
+		client = GetHTTPClient().GetClient()
+	} else {
+		// 音频、图片、样式均不自动跟随重定向，而是将 302 丢给客户端，让客户端直接请求重定向后的 CDN 真实地址，
+		// 这样可以彻底打通 Range 快速跳转 (seek) 通道，减少 VPS 请求链条，解决“跳转拖动后卡顿等待一段时间”的致命性能痛点。
+		client = GetHTTPClient().GetNoRedirectClient()
+	}
+
 	return &ProxyRequest{
 		originalURL: originalURL,
 		resourceType: resourceType,
-		client: GetHTTPClient().GetClient(),
+		client:      client,
 	}
 }
 
