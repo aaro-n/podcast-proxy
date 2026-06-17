@@ -51,16 +51,54 @@ func (b *ProxyURLBuilder) BuildStyleURL(apikey, originalURL string) string {
 	return b.buildURL("style", apikey, originalURL)
 }
 
-// buildURL 内部构建代理URL
+// buildURL 内部构建代理URL，带有虚拟文件名和原生后缀，以通过各大播客客户端和校验器的严格检测
 func (b *ProxyURLBuilder) buildURL(resourceType, apikey, originalURL string) string {
 	auth := NewAuthManager()
 	encodedKey := auth.EncodeKey(apikey)
 
-	raw := fmt.Sprintf("%s://%s/%s/%s?url=%s",
+	// 根据资源类型和原始URL猜测文件后缀，从而在路径中追加虚拟文件名
+	virtualFile := "file"
+	ext := ""
+	
+	// 解析原始URL获取其实际后缀
+	if parsed, err := url.Parse(originalURL); err == nil {
+		path := parsed.Path
+		if idx := strings.LastIndex(path, "."); idx != -1 {
+			possibleExt := path[idx:]
+			// 确保后缀不含斜杠且长度合理
+			if !strings.Contains(possibleExt, "/") && len(possibleExt) <= 6 {
+				ext = strings.ToLower(possibleExt)
+			}
+		}
+	}
+
+	// 默认备用后缀
+	if ext == "" {
+		switch resourceType {
+		case "audio":
+			ext = ".mp3"
+		case "image":
+			ext = ".jpg"
+		case "style":
+			ext = ".css"
+		}
+	}
+
+	switch resourceType {
+	case "audio":
+		virtualFile = "podcast" + ext
+	case "image":
+		virtualFile = "cover" + ext
+	case "style":
+		virtualFile = "style" + ext
+	}
+
+	raw := fmt.Sprintf("%s://%s/%s/%s/%s?url=%s",
 		b.scheme,
 		b.host,
 		resourceType,
 		url.PathEscape(encodedKey),
+		virtualFile,
 		url.QueryEscape(originalURL),
 	)
 
