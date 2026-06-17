@@ -51,6 +51,34 @@ func (ft *FeedTransformer) Transform(content string, builder *ProxyURLBuilder, a
 	// 6. 替换xml-stylesheet
 	content = ft.replaceStylesheet(content, builder, apikey)
 
+	// 7. 强行应用统一的本地美化 XSL 样式模板
+	content = ft.applyCustomStylesheet(content)
+
+	return content
+}
+
+// applyCustomStylesheet 强行应用我们的播客美化模板样式
+func (ft *FeedTransformer) applyCustomStylesheet(content string) string {
+	// 1. 移除或替换现有的所有 xml-stylesheet 指令
+	reStylesheet := regexp.MustCompile(`(?i)<\?xml-stylesheet\s+[^>]*\?>`)
+	
+	if reStylesheet.MatchString(content) {
+		// 如果已存在，直接替换为我们自己的
+		content = reStylesheet.ReplaceAllString(content, `<?xml-stylesheet type="text/xsl" href="/podcast.xsl"?>`)
+		return content
+	}
+
+	// 2. 如果不存在，我们需要在 <?xml ... ?> 声明后面插入
+	reXMLDecl := regexp.MustCompile(`(?i)^\s*<\?xml\s+[^>]*\?>`)
+	loc := reXMLDecl.FindStringIndex(content)
+	if loc != nil {
+		endIdx := loc[1]
+		content = content[:endIdx] + "\n<?xml-stylesheet type=\"text/xsl\" href=\"/podcast.xsl\"?>\n" + content[endIdx:]
+	} else {
+		// 如果连 <?xml ... ?> 都没有，那就直接在最开头插入
+		content = "<?xml-stylesheet type=\"text/xsl\" href=\"/podcast.xsl\"?>\n" + content
+	}
+
 	return content
 }
 

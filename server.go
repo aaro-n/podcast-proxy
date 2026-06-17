@@ -71,6 +71,12 @@ func (s *Server) RegisterRoutes() {
 		handler.Handle(w, r)
 	})
 
+	// 播客页面美化样式处理
+	s.mux.HandleFunc("/podcast.xsl", func(w http.ResponseWriter, r *http.Request) {
+		handler := NewPodcastXSLHandler(r)
+		handler.Handle(w, r)
+	})
+
 	// 根路由 - 所有请求返回404
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {

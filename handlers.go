@@ -337,6 +337,28 @@ func (nfh *NotFoundHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+// PodcastXSLHandler 专门处理我们自己播客美化样式的处理器
+type PodcastXSLHandler struct {
+	*HandlerBase
+}
+
+// NewPodcastXSLHandler 创建播客美化样式处理器
+func NewPodcastXSLHandler(r *http.Request) *PodcastXSLHandler {
+	return &PodcastXSLHandler{
+		HandlerBase: newHandlerBase(r),
+	}
+}
+
+// Handle 处理播客美化样式请求
+func (pxh *PodcastXSLHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	pxh.logger.LogStart()
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=604800") // 缓存1周
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(GetXSLTemplate()))
+	pxh.logger.LogComplete(http.StatusOK)
+}
+
 // 全局缓存管理器
 var _cacheManager *CacheManager
 
