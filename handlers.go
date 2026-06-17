@@ -207,10 +207,10 @@ func (ah *AudioHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	origURL = ah.sh.DecodeAmpersand(origURL)
 
 	// ⭐️ 创新性能优化：直连模式 (Bypass Proxy via Direct Redirect)
-	// 如果全局启用了 MEDIA_DIRECT_REDIRECT = true，或者当前请求显式携带了 &direct=1 参数，
-	// 代理不再对音频大文件进行流量中转（Proxying），而是直接对用户的客户端（小宇宙、浏览器等）
-	// 下发 307 Temporary Redirect 重定向至真实音频 URL。
-	// 这不仅将拖动进度条（Seek）延迟打压到了极致的 30ms-50ms，且完全不消耗您的 VPS 带宽和月流量！
+	// ⭐️ 默认必须进行音频中转代理，这是核心机制。
+	// 仅当管理员显式在环境变量中配置了 MEDIA_DIRECT_REDIRECT=true（开启旁路放行），
+	// 或者在特殊调试场景下 URL 显式指定了 &direct=1 时，才允许直接重定向以降低 VPS 带宽开销。
+	// 否则，所有音频一律无条件通过本代理服务器进行 512KB 高带宽时延积缓存中转。
 	if GetConfig().MediaDirectRedirect || r.URL.Query().Get("direct") == "1" {
 		http.Redirect(w, r, origURL, http.StatusTemporaryRedirect)
 		ah.logger.LogComplete(http.StatusTemporaryRedirect)
