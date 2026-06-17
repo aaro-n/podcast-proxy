@@ -43,8 +43,10 @@ func InitConfig() error {
 		}
 	}
 
-	log.Printf("配置初始化完成 - Port: %s, ForceHTTPS: %v, Timeout: %ds", 
-		config.Port, config.ForceHTTPS, config.Timeout)
+	config.MediaDirectRedirect = os.Getenv("MEDIA_DIRECT_REDIRECT") == "true"
+
+	log.Printf("配置初始化完成 - Port: %s, ForceHTTPS: %v, Timeout: %ds, MediaDirectRedirect: %v", 
+		config.Port, config.ForceHTTPS, config.Timeout, config.MediaDirectRedirect)
 	return nil
 }
 

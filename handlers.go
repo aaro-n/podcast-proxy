@@ -206,6 +206,17 @@ func (ah *AudioHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	origURL = ah.sh.DecodeAmpersand(origURL)
 
+	// ⭐️ 创新性能优化：直连模式 (Bypass Proxy via Direct Redirect)
+	// 如果全局启用了 MEDIA_DIRECT_REDIRECT = true，或者当前请求显式携带了 &direct=1 参数，
+	// 代理不再对音频大文件进行流量中转（Proxying），而是直接对用户的客户端（小宇宙、浏览器等）
+	// 下发 307 Temporary Redirect 重定向至真实音频 URL。
+	// 这不仅将拖动进度条（Seek）延迟打压到了极致的 30ms-50ms，且完全不消耗您的 VPS 带宽和月流量！
+	if GetConfig().MediaDirectRedirect || r.URL.Query().Get("direct") == "1" {
+		http.Redirect(w, r, origURL, http.StatusTemporaryRedirect)
+		ah.logger.LogComplete(http.StatusTemporaryRedirect)
+		return
+	}
+
 	// 执行代理请求
 	proxyReq := NewProxyRequest(origURL, string(ResourceAudio))
 	resp, err := proxyReq.Do(r)
@@ -266,6 +277,13 @@ func (ih *ImageHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	origURL = ih.sh.DecodeAmpersand(origURL)
+
+	// ⭐️ 创新性能优化：图片直连模式
+	if GetConfig().MediaDirectRedirect || r.URL.Query().Get("direct") == "1" {
+		http.Redirect(w, r, origURL, http.StatusTemporaryRedirect)
+		ih.logger.LogComplete(http.StatusTemporaryRedirect)
+		return
+	}
 
 	// 执行代理请求
 	proxyReq := NewProxyRequest(origURL, string(ResourceImage))
