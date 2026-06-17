@@ -149,6 +149,21 @@ func (l *LoggerHelper) LogComplete(statusCode int) {
 		l.start.Format("15:04:05"), l.method, l.path, statusCode, duration)
 }
 
+// RejectRequest 静默拒绝请求（关闭/中断 TCP 连接，不返回任何数据），使扫描器无法识别服务
+func RejectRequest(w http.ResponseWriter) {
+	hijacker, ok := w.(http.Hijacker)
+	if ok {
+		conn, _, err := hijacker.Hijack()
+		if err == nil {
+			conn.Close()
+			return
+		}
+	}
+	// 备用：若无法 Hijack，则写入 Connection: close 头并直接关闭，尽可能不发送多余的 HTTP 实体数据
+	w.Header().Set("Connection", "close")
+	w.WriteHeader(http.StatusNotFound)
+}
+
 // getRemoteAddr 获取客户端IP
 func getRemoteAddr(r *http.Request) string {
 	// 1. 尝试获取X-Forwarded-For（代理情况）

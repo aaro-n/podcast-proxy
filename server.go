@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,8 +29,16 @@ func NewServer(cfg *ProxyConfig) *Server {
 
 // RegisterRoutes 注册路由
 func (s *Server) RegisterRoutes() {
-	// 健康检查
+	// 健康检查 - 仅允许本地（Docker healthcheck 等）访问，其余扫描请求直接静默关闭
 	s.mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+		if host != "127.0.0.1" && host != "::1" && host != "localhost" {
+			RejectRequest(w)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok"}`))
@@ -71,14 +80,25 @@ func (s *Server) RegisterRoutes() {
 		handler.Handle(w, r)
 	})
 
-	// 播客页面美化样式处理
+	// 播客页面美化样式处理（注册带斜杠和不斜杠的，支持 API Key 认证）
+	s.mux.HandleFunc("/podcast.xsl/", func(w http.ResponseWriter, r *http.Request) {
+		handler := NewPodcastXSLHandler(r)
+		handler.Handle(w, r)
+	})
 	s.mux.HandleFunc("/podcast.xsl", func(w http.ResponseWriter, r *http.Request) {
 		handler := NewPodcastXSLHandler(r)
 		handler.Handle(w, r)
 	})
 
-	// 根路由 - 所有请求返回404
+	// 根路由及未匹配路由 - 必须提供合法 API Key，否则直接静默关闭 TCP 连接，不返回任何数据
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		auth := NewAuthManager()
+		_, valid := auth.VerifyRequest(r, "")
+		if !valid {
+			RejectRequest(w)
+			return
+		}
+
 		if r.URL.Path != "/" {
 			handler := NewNotFoundHandler(r)
 			handler.Handle(w, r)

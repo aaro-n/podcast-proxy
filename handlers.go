@@ -41,10 +41,10 @@ func NewFeedHandler(r *http.Request) *FeedHandler {
 func (fh *FeedHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	fh.logger.LogStart()
 
-	// 验证API Key
+	// 验证API Key (若非法直接静默断开，防止被扫描)
 	apikey, valid := fh.auth.VerifyRequest(r, "")
 	if !valid || apikey == "" {
-		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
+		RejectRequest(w)
 		fh.logger.LogComplete(http.StatusUnauthorized)
 		return
 	}
@@ -113,10 +113,10 @@ func (fh *FeedHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 设置响应头
-	contentType := "application/rss+xml; charset=utf-8"
-	if r.URL.Query().Get("display") == "1" {
-		contentType = "text/xml; charset=utf-8"
-	}
+	// 为了让直接在浏览器中访问的访客能够触发并渲染 xml-stylesheet 样式表，
+	// 我们将默认的 Content-Type 设为大多数现代浏览器都能触发 XSL 渲染的 application/xml; charset=utf-8。
+	// 所有主流播客客户端（小宇宙、Apple Podcasts 等）对该 Content-Type 同样能够完美识别和无缝解析。
+	contentType := "application/xml; charset=utf-8"
 
 	w.Header().Set("Content-Type", contentType)
 
@@ -155,10 +155,10 @@ func NewAudioHandler(r *http.Request) *AudioHandler {
 func (ah *AudioHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	ah.logger.LogStart()
 
-	// 验证API Key
+	// 验证API Key (若非法直接静默断开，防止被扫描)
 	apikey, valid := ah.auth.VerifyRequest(r, "/audio/")
 	if !valid || apikey == "" {
-		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
+		RejectRequest(w)
 		ah.logger.LogComplete(http.StatusUnauthorized)
 		return
 	}
@@ -216,10 +216,10 @@ func NewImageHandler(r *http.Request) *ImageHandler {
 func (ih *ImageHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	ih.logger.LogStart()
 
-	// 验证API Key
+	// 验证API Key (若非法直接静默断开，防止被扫描)
 	apikey, valid := ih.auth.VerifyRequest(r, "/image/")
 	if !valid || apikey == "" {
-		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
+		RejectRequest(w)
 		ih.logger.LogComplete(http.StatusUnauthorized)
 		return
 	}
@@ -277,10 +277,10 @@ func NewStyleHandler(r *http.Request) *StyleHandler {
 func (sh *StyleHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	sh.logger.LogStart()
 
-	// 验证API Key
+	// 验证API Key (若非法直接静默断开，防止被扫描)
 	apikey, valid := sh.auth.VerifyRequest(r, "/style/")
 	if !valid || apikey == "" {
-		http.Error(w, "unauthorized: invalid apikey", http.StatusUnauthorized)
+		RejectRequest(w)
 		sh.logger.LogComplete(http.StatusUnauthorized)
 		return
 	}
@@ -352,7 +352,16 @@ func NewPodcastXSLHandler(r *http.Request) *PodcastXSLHandler {
 // Handle 处理播客美化样式请求
 func (pxh *PodcastXSLHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	pxh.logger.LogStart()
-	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+
+	// 验证API Key (若非法直接静默断开，防止被扫描)
+	apikey, valid := pxh.auth.VerifyRequest(r, "/podcast.xsl/")
+	if !valid || apikey == "" {
+		RejectRequest(w)
+		pxh.logger.LogComplete(http.StatusUnauthorized)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/xsl; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=604800") // 缓存1周
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(GetXSLTemplate()))
