@@ -53,13 +53,16 @@ func (b *ProxyURLBuilder) BuildStyleURL(apikey, originalURL string) string {
 
 // buildURL 内部构建代理URL，带有虚拟文件名和原生后缀，以通过各大播客客户端和校验器的严格检测
 func (b *ProxyURLBuilder) buildURL(resourceType, apikey, originalURL string) string {
+	// RSS 属性里原始 URL 常带 &amp;，先还原为 & 再 QueryEscape，
+	// 否则会产生 %26amp%3B 二次编码，严格播放器可能校验失败。
+	originalURL = strings.ReplaceAll(originalURL, "&amp;", "&")
 	auth := NewAuthManager()
 	encodedKey := auth.EncodeKey(apikey)
 
 	// 根据资源类型和原始URL猜测文件后缀，从而在路径中追加虚拟文件名
 	virtualFile := "file"
 	ext := ""
-	
+
 	// 解析原始URL获取其实际后缀
 	if parsed, err := url.Parse(originalURL); err == nil {
 		path := parsed.Path
@@ -176,7 +179,7 @@ func NewLoggerHelper(r *http.Request) *LoggerHelper {
 
 // LogStart 记录请求开始
 func (l *LoggerHelper) LogStart() {
-	fmt.Printf("[%s] Start: %s %s from %s\n", 
+	fmt.Printf("[%s] Start: %s %s from %s\n",
 		l.start.Format("15:04:05"), l.method, l.path, l.addr)
 }
 
@@ -244,5 +247,3 @@ func (*StringHelper) IsImageURL(u string) bool {
 	}
 	return false
 }
-
-

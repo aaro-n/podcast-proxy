@@ -12,8 +12,8 @@ import (
 
 // HandlerBase 处理器基类
 type HandlerBase struct {
-	auth       *AuthManager
-	logger     *LoggerHelper
+	auth   *AuthManager
+	logger *LoggerHelper
 }
 
 // newHandlerBase 创建处理器基类
@@ -186,12 +186,13 @@ func NewAudioHandler(r *http.Request) *AudioHandler {
 }
 
 // Handle 处理音频请求
+// 音频由服务端跟完所有 302/307 后直接透流最终 200/206，客户端只看到最终音频。
 func (ah *AudioHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	ah.logger.LogStart()
 
 	// 验证API Key (若非法直接静默断开，防止被扫描)
-	apikey, valid := ah.auth.VerifyRequest(r, "/audio/")
-	if !valid || apikey == "" {
+	_, valid := ah.auth.VerifyRequest(r, "/audio/")
+	if !valid {
 		RejectRequest(w)
 		ah.logger.LogComplete(http.StatusUnauthorized)
 		return
@@ -217,7 +218,7 @@ func (ah *AudioHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 执行代理请求
+	// 执行代理请求（音频客户端已跟随全部跳转，resp 即最终音频响应）
 	proxyReq := NewProxyRequest(origURL, string(ResourceAudio))
 	resp, err := proxyReq.Do(r)
 	if err != nil {
@@ -226,13 +227,10 @@ func (ah *AudioHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 处理重定向
+	// 直接透流最终音频：不再调用 HandleRedirect 抛二次 302 给客户端。
+	// 客户端全程只看到一次 200/206，无需感知中间跳了几次 302/307。
 	builder := NewProxyURLBuilder(r)
 	proxyResp := NewProxyResponse(resp, string(ResourceAudio))
-	if redirected, _ := proxyResp.HandleRedirect(w, r, apikey, builder); redirected {
-		ah.logger.LogComplete(http.StatusFound)
-		return
-	}
 
 	// 复制响应
 	if err := proxyResp.WriteResponse(w, r, builder); err != nil {
@@ -262,8 +260,8 @@ func (ih *ImageHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	ih.logger.LogStart()
 
 	// 验证API Key (若非法直接静默断开，防止被扫描)
-	apikey, valid := ih.auth.VerifyRequest(r, "/image/")
-	if !valid || apikey == "" {
+	_, valid := ih.auth.VerifyRequest(r, "/image/")
+	if !valid {
 		RejectRequest(w)
 		ih.logger.LogComplete(http.StatusUnauthorized)
 		return
@@ -285,7 +283,7 @@ func (ih *ImageHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 执行代理请求
+	// 执行代理请求（服务端已跟随全部跳转，resp 即最终图片响应，直接透流）
 	proxyReq := NewProxyRequest(origURL, string(ResourceImage))
 	resp, err := proxyReq.Do(r)
 	if err != nil {
@@ -294,13 +292,9 @@ func (ih *ImageHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 处理重定向
+	// 直接透流最终图片：不再抛二次 302 给客户端，避免多跳导致加载失败。
 	builder := NewProxyURLBuilder(r)
 	proxyResp := NewProxyResponse(resp, string(ResourceImage))
-	if redirected, _ := proxyResp.HandleRedirect(w, r, apikey, builder); redirected {
-		ih.logger.LogComplete(http.StatusFound)
-		return
-	}
 
 	// 复制响应
 	if err := proxyResp.WriteResponse(w, r, builder); err != nil {
@@ -321,7 +315,7 @@ type StyleHandler struct {
 func NewStyleHandler(r *http.Request) *StyleHandler {
 	return &StyleHandler{
 		HandlerBase: newHandlerBase(r),
-		sh: &StringHelper{},
+		sh:          &StringHelper{},
 	}
 }
 
@@ -330,8 +324,8 @@ func (sh *StyleHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	sh.logger.LogStart()
 
 	// 验证API Key (若非法直接静默断开，防止被扫描)
-	apikey, valid := sh.auth.VerifyRequest(r, "/style/")
-	if !valid || apikey == "" {
+	_, valid := sh.auth.VerifyRequest(r, "/style/")
+	if !valid {
 		RejectRequest(w)
 		sh.logger.LogComplete(http.StatusUnauthorized)
 		return
@@ -346,7 +340,7 @@ func (sh *StyleHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	origURL = sh.sh.DecodeAmpersand(origURL)
 
-	// 执行代理请求
+	// 执行代理请求（服务端已跟随全部跳转，resp 即最终样式响应，直接透流）
 	proxyReq := NewProxyRequest(origURL, string(ResourceStyle))
 	resp, err := proxyReq.Do(r)
 	if err != nil {
@@ -355,13 +349,9 @@ func (sh *StyleHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 处理重定向
+	// 直接透流最终样式：不再抛二次 302 给客户端。
 	builder := NewProxyURLBuilder(r)
 	proxyResp := NewProxyResponse(resp, string(ResourceStyle))
-	if redirected, _ := proxyResp.HandleRedirect(w, r, apikey, builder); redirected {
-		sh.logger.LogComplete(http.StatusFound)
-		return
-	}
 
 	// 复制响应
 	if err := proxyResp.WriteResponse(w, r, builder); err != nil {
