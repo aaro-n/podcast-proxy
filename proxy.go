@@ -24,6 +24,8 @@ func (hm *HTTPClientManager) init(timeout time.Duration) {
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 100,
 		IdleConnTimeout:     90 * time.Second,
+		// 出站守卫：DNS 解析后的 IP 校验 + 端口白名单，每跳重定向都会经过
+		DialContext: egressDialContext,
 		// 支持Range请求
 		DisableCompression: false,
 	}
@@ -61,6 +63,8 @@ func (hm *HTTPClientManager) init(timeout time.Duration) {
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 100,
 			IdleConnTimeout:     90 * time.Second,
+			// 出站守卫：DNS 解析后的 IP 校验 + 端口白名单，每跳重定向都会经过
+			DialContext: egressDialContext,
 			// 音频禁止 gzip：否则源站返回 gzip 而我们剥掉 Content-Encoding 会损坏字节流
 			DisableCompression:    true,
 			ResponseHeaderTimeout: timeout,
@@ -149,7 +153,9 @@ func (pr *ProxyRequest) Do(sourceReq *http.Request) (*http.Response, error) {
 	if method != "HEAD" {
 		method = "GET"
 	}
-	req, err := http.NewRequest(method, pr.originalURL, nil)
+	// 绑定客户端请求的 Context：客户端断开（拖动进度条、关闭播放器、跳过一集）时
+	// 立即取消上游请求，避免继续下载已经没人要的音频而白白消耗带宽。
+	req, err := http.NewRequestWithContext(sourceReq.Context(), method, pr.originalURL, nil)
 	if err != nil {
 		return nil, err
 	}

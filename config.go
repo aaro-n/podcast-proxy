@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -45,9 +46,45 @@ func InitConfig() error {
 
 	config.MediaDirectRedirect = os.Getenv("MEDIA_DIRECT_REDIRECT") == "true"
 
-	log.Printf("配置初始化完成 - Port: %s, ForceHTTPS: %v, Timeout: %ds, MediaDirectRedirect: %v", 
+	// 出站守卫：默认开启，只有显式 EGRESS_GUARD=false 才关闭
+	config.EgressGuard = os.Getenv("EGRESS_GUARD") != "false"
+	config.EgressAllowPrivate = os.Getenv("EGRESS_ALLOW_PRIVATE") == "true"
+	config.EgressAllowedPorts = parsePortSet(os.Getenv("EGRESS_ALLOWED_PORTS"), "80,443")
+
+	// 媒体并发上限
+	config.MediaMaxConcurrency = 32
+	if n := os.Getenv("MEDIA_MAX_CONCURRENCY"); n != "" {
+		if v, err := strconv.Atoi(n); err == nil && v > 0 {
+			config.MediaMaxConcurrency = v
+		}
+	}
+
+	log.Printf("配置初始化完成 - Port: %s, ForceHTTPS: %v, Timeout: %ds, MediaDirectRedirect: %v",
 		config.Port, config.ForceHTTPS, config.Timeout, config.MediaDirectRedirect)
+	log.Printf("出站守卫 - 启用: %v, 允许内网: %v, 允许端口: %s, 媒体并发上限: %d",
+		config.EgressGuard, config.EgressAllowPrivate, os.Getenv("EGRESS_ALLOWED_PORTS"), config.MediaMaxConcurrency)
 	return nil
+}
+
+// parsePortSet 解析逗号分隔的端口白名单，非法项自动忽略；为空时回退到 fallback
+func parsePortSet(raw, fallback string) map[string]bool {
+	add := func(dst map[string]bool, s string) {
+		for _, p := range strings.Split(s, ",") {
+			p = strings.TrimSpace(p)
+			n, err := strconv.Atoi(p)
+			if err != nil || n <= 0 || n > 65535 {
+				continue
+			}
+			dst[strconv.Itoa(n)] = true
+		}
+	}
+
+	set := make(map[string]bool)
+	add(set, raw)
+	if len(set) == 0 {
+		add(set, fallback)
+	}
+	return set
 }
 
 // GetConfig 获取全局配置

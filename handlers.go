@@ -7,8 +7,36 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
+
+// 媒体回源并发限制
+//
+// 公网服务 + 可代理任意 URL = 可能被人当成免费出口/下载器。
+// 限制同时进行中的回源请求数，可以避免几十个并发长连接把带宽和 goroutine 吃满。
+var (
+	mediaSlotsOnce sync.Once
+	mediaSlots     chan struct{}
+)
+
+// acquireMediaSlot 尝试获取一个媒体回源名额，成功返回释放函数
+func acquireMediaSlot() (func(), bool) {
+	mediaSlotsOnce.Do(func() {
+		n := GetConfig().MediaMaxConcurrency
+		if n <= 0 {
+			n = 32
+		}
+		mediaSlots = make(chan struct{}, n)
+	})
+
+	select {
+	case mediaSlots <- struct{}{}:
+		return func() { <-mediaSlots }, true
+	default:
+		return nil, false
+	}
+}
 
 // HandlerBase 处理器基类
 type HandlerBase struct {
@@ -75,7 +103,8 @@ func (fh *FeedHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	proxyReq := NewProxyRequest(feedURL, string(ResourceFeed))
 	resp, err := proxyReq.Do(r)
 	if err != nil {
-		http.Error(w, "failed to fetch feed: "+err.Error(), http.StatusBadGateway)
+		log.Printf("[ERROR] 回源获取 feed 失败: url=%s err=%v", feedURL, err)
+		http.Error(w, "upstream fetch failed", http.StatusBadGateway)
 		fh.logger.LogComplete(http.StatusBadGateway)
 		return
 	}
@@ -103,7 +132,8 @@ func (fh *FeedHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// 读取RSS内容
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		http.Error(w, "failed to read feed: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("[ERROR] 读取 feed 内容失败: %v", err)
+		http.Error(w, "failed to read upstream feed", http.StatusInternalServerError)
 		fh.logger.LogComplete(http.StatusInternalServerError)
 		return
 	}
@@ -219,10 +249,20 @@ func (ah *AudioHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 执行代理请求（音频客户端已跟随全部跳转，resp 即最终音频响应）
+	release, ok := acquireMediaSlot()
+	if !ok {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "server busy", http.StatusServiceUnavailable)
+		ah.logger.LogComplete(http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
+
 	proxyReq := NewProxyRequest(origURL, string(ResourceAudio))
 	resp, err := proxyReq.Do(r)
 	if err != nil {
-		http.Error(w, "failed to fetch audio: "+err.Error(), http.StatusBadGateway)
+		log.Printf("[ERROR] 回源获取音频失败: url=%s err=%v", origURL, err)
+		http.Error(w, "upstream fetch failed", http.StatusBadGateway)
 		ah.logger.LogComplete(http.StatusBadGateway)
 		return
 	}
@@ -284,10 +324,20 @@ func (ih *ImageHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 执行代理请求（服务端已跟随全部跳转，resp 即最终图片响应，直接透流）
+	release, ok := acquireMediaSlot()
+	if !ok {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "server busy", http.StatusServiceUnavailable)
+		ih.logger.LogComplete(http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
+
 	proxyReq := NewProxyRequest(origURL, string(ResourceImage))
 	resp, err := proxyReq.Do(r)
 	if err != nil {
-		http.Error(w, "failed to fetch image: "+err.Error(), http.StatusBadGateway)
+		log.Printf("[ERROR] 回源获取图片失败: url=%s err=%v", origURL, err)
+		http.Error(w, "upstream fetch failed", http.StatusBadGateway)
 		ih.logger.LogComplete(http.StatusBadGateway)
 		return
 	}
@@ -344,7 +394,8 @@ func (sh *StyleHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	proxyReq := NewProxyRequest(origURL, string(ResourceStyle))
 	resp, err := proxyReq.Do(r)
 	if err != nil {
-		http.Error(w, "failed to fetch style: "+err.Error(), http.StatusBadGateway)
+		log.Printf("[ERROR] 回源获取样式失败: url=%s err=%v", origURL, err)
+		http.Error(w, "upstream fetch failed", http.StatusBadGateway)
 		sh.logger.LogComplete(http.StatusBadGateway)
 		return
 	}

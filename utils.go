@@ -171,10 +171,20 @@ type LoggerHelper struct {
 func NewLoggerHelper(r *http.Request) *LoggerHelper {
 	return &LoggerHelper{
 		method: r.Method,
-		path:   r.URL.String(),
+		path:   sanitizeLogPath(r.URL),
 		addr:   getRemoteAddr(r),
 		start:  time.Now(),
 	}
+}
+
+// sanitizeLogPath 日志脱敏：只保留路径，丢弃 query。
+// query 里含有 apikey 和源站地址，写进日志后会长期留在磁盘上，
+// 既浪费空间，也容易在贴日志排查问题时意外泄露凭据。
+func sanitizeLogPath(u *url.URL) string {
+	if u.RawQuery == "" {
+		return u.Path
+	}
+	return u.Path + "?<redacted>"
 }
 
 // LogStart 记录请求开始

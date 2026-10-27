@@ -14,8 +14,8 @@ import (
 
 // Server 服务器
 type Server struct {
-	config    *ProxyConfig
-	mux       *http.ServeMux
+	config     *ProxyConfig
+	mux        *http.ServeMux
 	httpServer *http.Server
 }
 
@@ -119,6 +119,12 @@ func (s *Server) StartWithMiddleware() error {
 	s.httpServer = &http.Server{
 		Addr:    addr,
 		Handler: logMiddleware(s.mux),
+		// 防止慢速攻击（Slowloris）长期占用连接与 goroutine。
+		// 注意不要设置 WriteTimeout/整体 ReadTimeout：音频是长时间流式传输，
+		// 设了会在播放中途掐断连接。
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10, // 16KB，远小于默认 1MB
 	}
 
 	// 启动信号监听（用于优雅关闭）

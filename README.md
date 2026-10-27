@@ -45,6 +45,12 @@ export PORT="8080"                    # 默认8080
 export FORCE_HTTPS="false"           # 是否强制HTTPS
 export PUBLIC_HOST="example.com"     # 公开域名（用于生成代理URL）
 export TIMEOUT="30"                  # HTTP超时（秒）
+
+# 出站守卫（防止服务被当成开放代理滥用）
+export EGRESS_GUARD="true"           # 默认开启；设为 false 关闭（不推荐）
+export EGRESS_ALLOW_PRIVATE="false"  # 允许访问内网地址（NAS/局域网源站时才开）
+export EGRESS_ALLOWED_PORTS="80,443" # 出站端口白名单
+export MEDIA_MAX_CONCURRENCY="32"    # 音频/图片同时回源上限
 ```
 
 ### 本地运行
