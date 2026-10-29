@@ -80,7 +80,8 @@ func (s *Server) RegisterRoutes() {
 		handler.Handle(w, r)
 	})
 
-	// 播客页面美化样式处理（注册带斜杠和不斜杠的，支持 API Key 认证）
+	// Legacy stylesheet endpoint retained temporarily for existing bookmarks/feed
+	// wrappers. New /feed responses never reference XSLT; browsers use native HTML.
 	s.mux.HandleFunc("/podcast.xsl/", func(w http.ResponseWriter, r *http.Request) {
 		handler := NewPodcastXSLHandler(r)
 		handler.Handle(w, r)
@@ -88,6 +89,11 @@ func (s *Server) RegisterRoutes() {
 	s.mux.HandleFunc("/podcast.xsl", func(w http.ResponseWriter, r *http.Request) {
 		handler := NewPodcastXSLHandler(r)
 		handler.Handle(w, r)
+	})
+
+	// POST /links with the master API key returns a feed-scoped PinePods URL.
+	s.mux.HandleFunc("/links", func(w http.ResponseWriter, r *http.Request) {
+		handleGenerateFeedLink(w, r)
 	})
 
 	// 根路由及未匹配路由 - 必须提供合法 API Key，否则直接静默关闭 TCP 连接，不返回任何数据
@@ -123,6 +129,7 @@ func (s *Server) StartWithMiddleware() error {
 		// 注意不要设置 WriteTimeout/整体 ReadTimeout：音频是长时间流式传输，
 		// 设了会在播放中途掐断连接。
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 << 10, // 16KB，远小于默认 1MB
 	}

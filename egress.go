@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -87,7 +88,11 @@ func egressControl(network, address string, _ syscall.RawConn) error {
 		return errBlockedEgress
 	}
 
-	if !cfg.EgressAllowedPorts[port] {
+	portNumber, portErr := strconv.Atoi(port)
+	if portErr != nil || portNumber < 1 || portNumber > 65535 {
+		return errBlockedEgress
+	}
+	if !cfg.EgressAllowedPorts[strconv.Itoa(portNumber)] {
 		log.Printf("[EGRESS] 拒绝非白名单端口: %s", address)
 		return errBlockedEgress
 	}
@@ -124,8 +129,17 @@ func checkEgressIP(ip net.IP, allowPrivate bool) error {
 		return errBlockedEgress
 	}
 
-	// 显式允许内网（例如 NAS 上的播客源）时，跳过私网/CIDR 检查
+	// 显式允许内网（例如 NAS 上的播客源站）时，只放行 RFC1918 与 IPv6 ULA；
+	// CGNAT、文档网段、协议保留网段仍拒绝，避免该开关顺带放开整个保留地址空间。
 	if allowPrivate {
+		if ip.IsPrivate() {
+			return nil
+		}
+		for _, n := range blockedEgressCIDRs {
+			if n.Contains(ip) {
+				return errBlockedEgress
+			}
+		}
 		return nil
 	}
 

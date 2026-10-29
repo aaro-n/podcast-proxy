@@ -6,11 +6,19 @@ services:
     image: podcast-proxy:latest
     container_name: podcast-proxy
     environment:
-      PODCAST_PROXY_APIKEY: "test-key-12345"
+      PODCAST_PROXY_APIKEY: "${PODCAST_PROXY_APIKEY:?Set a strong PODCAST_PROXY_APIKEY in the environment}"
       PORT: "8080"
-      FORCE_HTTPS: "false"
+      FORCE_HTTPS: "${FORCE_HTTPS:-false}"
+      PUBLIC_HOST: "${PUBLIC_HOST:-}"
+      TRUST_PROXY_HEADERS: "${TRUST_PROXY_HEADERS:-false}"
+      FEED_MAX_BYTES: "${FEED_MAX_BYTES:-8388608}"
+      FEED_MAX_CONCURRENCY: "${FEED_MAX_CONCURRENCY:-16}"
+      MEDIA_MAX_CONCURRENCY: "${MEDIA_MAX_CONCURRENCY:-32}"
+      EGRESS_GUARD: "${EGRESS_GUARD:-true}"
+      EGRESS_ALLOW_PRIVATE: "${EGRESS_ALLOW_PRIVATE:-false}"
+      ALLOW_LEGACY_MEDIA_KEY: "${ALLOW_LEGACY_MEDIA_KEY:-false}"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]

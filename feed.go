@@ -2,250 +2,727 @@ package main
 
 import (
 	"encoding/xml"
+	"fmt"
+	"io"
+	"mime"
+	"net/url"
 	"regexp"
 	"strings"
 )
 
-// FeedTransformer RSS源转换器
-type FeedTransformer struct {
-	regexes map[string]*regexp.Regexp
+const (
+	itunesNamespace   = "http://www.itunes.com/dtds/podcast-1.0.dtd"
+	podcastNamespace  = "https://podcastindex.org/namespace/1.0"
+	atomNamespace     = "http://www.w3.org/2005/Atom"
+	mediaRSSNamespace = "http://search.yahoo.com/mrss/"
+)
+
+var (
+	xmlDeclarationRE = regexp.MustCompile(`(?is)^\s*<\?xml\b[^?]*\?>`)
+	encodingAttrRE   = regexp.MustCompile(`(?i)\bencoding\s*=\s*(['"])([^'"]+)(['"])`)
+)
+
+// FeedTransformer rewrites media URLs in RSS 2.0 and Atom while preserving the
+// original XML byte-for-byte except for selected URL values and the browser PI.
+type FeedTransformer struct{}
+
+func NewFeedTransformer() *FeedTransformer { return &FeedTransformer{} }
+
+type xmlReplacement struct {
+	start int
+	end   int
+	value string
 }
 
-// NewFeedTransformer 创建RSS转换器
-func NewFeedTransformer() *FeedTransformer {
-	return &FeedTransformer{
-		regexes: map[string]*regexp.Regexp{
-			// enclosure标签：<enclosure url="..." />
-			"enclosure": regexp.MustCompile(`(<enclosure\s+[^>]*?url=")([^"]+)`),
-			// iTunes图片：<itunes:image href="..." />
-			"itunes_image": regexp.MustCompile(`(<itunes:image\s+[^>]*?href=")([^"]+)`),
-			// 标准图片标签：<image><url>...</url></image>
-			"image_url": regexp.MustCompile(`(<image>[\s\S]*?<url>)([^<]+)(<\/url>)`),
-			// 媒体缩略图：<media:thumbnail url="..." />
-			"media_thumbnail": regexp.MustCompile(`(<media:thumbnail\s+[^>]*?url=")([^"]+)`),
-			// 媒体内容：<media:content url="..." />
-			"media_content": regexp.MustCompile(`<media:content\s+[^>]*?url="[^"]+"[^>]*>`),
-			// XML样式表：<?xml-stylesheet href="..." ?>
-			"stylesheet": regexp.MustCompile(`(<\?xml-stylesheet[^>]*href=")([^"]+)(")>`),
-		},
-	}
+type feedElementFrame struct {
+	Name xml.Name
+	Base string
 }
 
-// Transform 转换RSS源
+type feedRewriteResult struct {
+	Content string
+}
+
 func (ft *FeedTransformer) Transform(content string, builder *ProxyURLBuilder, apikey string) string {
-	// 1. 替换enclosure（音频）
-	content = ft.replaceWithRegex(content, "enclosure", builder, apikey, ResourceAudio)
-
-	// 2. 替换iTunes图片
-	content = ft.replaceWithRegex(content, "itunes_image", builder, apikey, ResourceImage)
-
-	// 3. 替换image标签中的URL
-	content = ft.replaceImageURL(content, builder, apikey)
-
-	// 4. 替换media:thumbnail
-	content = ft.replaceWithRegex(content, "media_thumbnail", builder, apikey, ResourceImage)
-
-	// 5. 替换media:content
-	content = ft.replaceMediaContent(content, builder, apikey)
-
-	// 6. 替换xml-stylesheet
-	content = ft.replaceStylesheet(content, builder, apikey)
-
-	// 7. 强行应用统一的本地美化 XSL 样式模板
-	content = ft.applyCustomStylesheet(content, apikey)
-
-	return content
+	return ft.TransformWithoutStylesheet(content, builder, apikey, false)
 }
 
-// applyCustomStylesheet 强行应用我们的播客美化模板样式，带有 API Key 保护
-func (ft *FeedTransformer) applyCustomStylesheet(content string, apikey string) string {
-	auth := NewAuthManager()
-	encodedKey := auth.EncodeKey(apikey)
-	xslURL := xmlEscape("/podcast.xsl/" + encodedKey)
-
-	// 1. 移除或替换现有的所有 xml-stylesheet 指令
-	reStylesheet := regexp.MustCompile(`(?i)<\?xml-stylesheet\s+[^>]*\?>`)
-	
-	if reStylesheet.MatchString(content) {
-		// 如果已存在，直接替换为我们自己的
-		content = reStylesheet.ReplaceAllString(content, `<?xml-stylesheet type="text/xsl" href="`+xslURL+`"?>`)
+// TransformWithoutStylesheet supports a presentation-free feed for API clients.
+func (ft *FeedTransformer) TransformWithoutStylesheet(content string, builder *ProxyURLBuilder, apikey string, stylesheet bool) string {
+	transformed, err := ft.TransformStrict(content, builder, apikey, stylesheet)
+	if err != nil {
 		return content
 	}
+	return transformed
+}
 
-	// 2. 如果不存在，我们需要在 <?xml ... ?> 声明后面插入
-	reXMLDecl := regexp.MustCompile(`(?i)^\s*<\?xml\s+[^>]*\?>`)
-	loc := reXMLDecl.FindStringIndex(content)
-	if loc != nil {
-		endIdx := loc[1]
-		content = content[:endIdx] + "\n<?xml-stylesheet type=\"text/xsl\" href=\""+xslURL+"\"?>\n" + content[endIdx:]
-	} else {
-		// 如果连 <?xml ... ?> 都没有，那就直接在最开头插入
-		content = "<?xml-stylesheet type=\"text/xsl\" href=\""+xslURL+"\"?>\n" + content
+func (ft *FeedTransformer) TransformStrict(content string, builder *ProxyURLBuilder, apikey string, stylesheet bool, feedCredentials ...string) (string, error) {
+	result, err := ft.TransformWithRoutes(content, builder, apikey, stylesheet, feedCredentials...)
+	return result.Content, err
+}
+
+func (ft *FeedTransformer) TransformWithRoutes(content string, builder *ProxyURLBuilder, apikey string, stylesheet bool, feedCredentials ...string) (feedRewriteResult, error) {
+	if builder == nil {
+		return feedRewriteResult{}, fmt.Errorf("proxy URL builder is required")
 	}
-
-	return content
-}
-
-// replaceWithRegex 使用正则表达式替换URL
-func (ft *FeedTransformer) replaceWithRegex(content string, regexName string, 
-	builder *ProxyURLBuilder, apikey string, resourceType ProxyResource) string {
-	
-	regex := ft.regexes[regexName]
-	if regex == nil {
-		return content
+	replacements, err := collectFeedURLReplacements(content, builder, apikey, feedCredentials...)
+	if err != nil {
+		return feedRewriteResult{}, err
 	}
-
-	return regex.ReplaceAllStringFunc(content, func(match string) string {
-		parts := regex.FindStringSubmatch(match)
-		if len(parts) < 3 {
-			return match
-		}
-
-		prefix := parts[1]
-		originalURL := parts[2]
-
-		var proxyURL string
-		switch resourceType {
-		case ResourceAudio:
-			proxyURL = builder.BuildAudioURL(apikey, originalURL)
-		case ResourceImage:
-			proxyURL = builder.BuildImageURL(apikey, originalURL)
-		case ResourceStyle:
-			proxyURL = builder.BuildStyleURL(apikey, originalURL)
-		default:
-			proxyURL = originalURL
-		}
-
-		return prefix + proxyURL
-	})
+	transformed, err := applyXMLReplacements(content, replacements)
+	if err != nil {
+		return feedRewriteResult{}, err
+	}
+	transformed, err = stripFeedStylesheets(transformed)
+	if err != nil {
+		return feedRewriteResult{}, err
+	}
+	// Keep the parameter for source compatibility with callers compiled against
+	// the previous API. Presentation is now native HTML served by /feed, never an
+	// XSLT processing instruction in subscribed RSS/Atom documents.
+	_ = stylesheet
+	return feedRewriteResult{Content: transformed}, nil
 }
 
-// replaceImageURL 特殊处理<image><url>格式
-func (ft *FeedTransformer) replaceImageURL(content string, builder *ProxyURLBuilder, apikey string) string {
-	regex := ft.regexes["image_url"]
-	
-	return regex.ReplaceAllStringFunc(content, func(match string) string {
-		parts := regex.FindStringSubmatch(match)
-		if len(parts) < 4 {
-			return match
+func normalizeFeedXML(content string) (string, error) {
+	label := ""
+	if strings.HasPrefix(content, "\xff\xfe") {
+		label = "utf-16le"
+	} else if strings.HasPrefix(content, "\xfe\xff") {
+		label = "utf-16be"
+	} else if strings.HasPrefix(content, "<\x00?\x00x\x00m\x00l\x00") {
+		label = "utf-16le"
+	} else if strings.HasPrefix(content, "\x00<\x00?\x00x\x00m\x00l") {
+		label = "utf-16be"
+	}
+	if label == "" {
+		declaration := xmlDeclarationRE.FindString(content)
+		if declaration == "" {
+			return content, nil
 		}
-
-		prefix := parts[1]
-		originalURL := strings.TrimSpace(parts[2])
-		suffix := parts[3]
-
-		proxyURL := builder.BuildImageURL(apikey, originalURL)
-		return prefix + proxyURL + suffix
-	})
+		match := encodingAttrRE.FindStringSubmatch(declaration)
+		if len(match) != 4 || match[1] != match[3] {
+			return content, nil
+		}
+		label = strings.TrimSpace(match[2])
+	}
+	if strings.EqualFold(label, "utf-8") || strings.EqualFold(label, "utf8") || strings.EqualFold(label, "us-ascii") {
+		return content, nil
+	}
+	reader, err := newCharsetReader(label, strings.NewReader(content))
+	if err != nil {
+		return "", err
+	}
+	const maxNormalizedFeedSize = 64 << 20
+	decoded, err := io.ReadAll(io.LimitReader(reader, maxNormalizedFeedSize+1))
+	if err != nil {
+		return "", err
+	}
+	if len(decoded) > maxNormalizedFeedSize {
+		return "", fmt.Errorf("normalized feed exceeds size limit")
+	}
+	normalized := string(decoded)
+	declaration := xmlDeclarationRE.FindString(normalized)
+	if declaration != "" {
+		match := encodingAttrRE.FindStringSubmatchIndex(declaration)
+		if len(match) == 8 {
+			start, end := match[4], match[5]
+			declaration = declaration[:start] + "UTF-8" + declaration[end:]
+			normalized = strings.Replace(normalized, xmlDeclarationRE.FindString(string(decoded)), declaration, 1)
+		}
+	}
+	return normalized, nil
 }
 
-// replaceStylesheet 替换xml-stylesheet
-func (ft *FeedTransformer) replaceStylesheet(content string, builder *ProxyURLBuilder, apikey string) string {
-	regex := ft.regexes["stylesheet"]
-	
-	return regex.ReplaceAllStringFunc(content, func(match string) string {
-		parts := regex.FindStringSubmatch(match)
-		if len(parts) < 4 {
-			return match
+func collectFeedURLReplacements(content string, builder *ProxyURLBuilder, apikey string, feedCredentials ...string) ([]xmlReplacement, error) {
+	decoder := newXMLDecoder(content)
+	decoder.Strict = true
+	var replacements []xmlReplacement
+	var stack []feedElementFrame
+	for {
+		tokenStart := decoder.InputOffset()
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
 		}
-
-		prefix := parts[1]
-		originalURL := parts[2]
-		suffix := parts[3]
-
-		proxyURL := builder.BuildStyleURL(apikey, originalURL)
-		return prefix + proxyURL + suffix
-	})
-}
-
-// replaceMediaContent 特殊处理<media:content>（需判断音频/图片）
-func (ft *FeedTransformer) replaceMediaContent(content string, builder *ProxyURLBuilder, apikey string) string {
-	regex := ft.regexes["media_content"]
-	sh := &StringHelper{}
-
-	return regex.ReplaceAllStringFunc(content, func(match string) string {
-		// 判断类型
-		var proxyFunc func(string, string) string
-
-		if strings.Contains(match, `type="audio/`) {
-			proxyFunc = builder.BuildAudioURL
-		} else if strings.Contains(match, `type="image/`) {
-			proxyFunc = builder.BuildImageURL
-		} else {
-			// 根据URL后缀判断
-			urlRegex := regexp.MustCompile(`url="([^"]+)"`)
-			urlMatch := urlRegex.FindStringSubmatch(match)
-			if len(urlMatch) > 1 {
-				url := urlMatch[1]
-				if sh.IsImageURL(url) {
-					proxyFunc = builder.BuildImageURL
-				} else {
-					proxyFunc = builder.BuildAudioURL
+		if err != nil {
+			return nil, err
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			baseURL := builder.sourceURL
+			if len(stack) > 0 {
+				baseURL = stack[len(stack)-1].Base
+			}
+			for _, attr := range value.Attr {
+				if attr.Name.Space == "http://www.w3.org/XML/1998/namespace" && attr.Name.Local == "base" {
+					if resolved, err := resolveFeedURL(baseURL, attr.Value); err == nil {
+						baseURL = resolved
+					}
 				}
-			} else {
-				return match
+			}
+			elementBuilder := *builder
+			elementBuilder.sourceURL = baseURL
+			parent := ""
+			if len(stack) > 0 {
+				parent = stack[len(stack)-1].Name.Local
+			}
+			tokenEnd := decoder.InputOffset()
+			elementName := qualifiedElementName(content, tokenEnd)
+			mimeType, hasInferredType := inferredEnclosureType(value.Name, parent, stack, value.Attr)
+			hasTypeAttribute := false
+			for _, attr := range value.Attr {
+				if attr.Name.Space == "" && attr.Name.Local == "type" {
+					hasTypeAttribute = true
+					currentType := strings.ToLower(strings.TrimSpace(attr.Value))
+					if hasInferredType && !strings.HasPrefix(currentType, "audio/") && !strings.HasPrefix(currentType, "video/") {
+						replacement, ok := locateAttributeReplacement(
+							content,
+							tokenEnd,
+							elementName,
+							attr.Name.Local,
+							attr.Value,
+							mimeType,
+						)
+						if ok {
+							replacements = append(replacements, replacement)
+						}
+					}
+				}
+				resource, ok := feedAttributeResource(stack, parent, value.Name, value.Attr, attr)
+				if !ok {
+					continue
+				}
+				proxyURL, err := buildFeedProxyURL(&elementBuilder, apikey, resource, attr.Value, feedCredentials...)
+				if err != nil {
+					return nil, fmt.Errorf("invalid media URL in feed")
+				}
+				if resource == ResourceAudio || resource == ResourceImage || resource == ResourceStyle {
+					if token := routeTokenFromProxyURL(proxyURL); token != "" {
+						if currentURL, err := resolveFeedURL(elementBuilder.sourceURL, attr.Value); err == nil {
+							UpdateResourceRouteURL(resource, token, currentURL)
+						}
+					}
+				}
+				if resource == ResourceAudio || resource == ResourceImage || resource == ResourceStyle {
+					proxyURL = registerCredentialsOnMediaURL(proxyURL, feedCredentials...)
+				}
+				replacement, ok := locateAttributeReplacement(content, tokenEnd, elementName, attr.Name.Local, attr.Value, proxyURL)
+				if !ok {
+					return nil, fmt.Errorf("unable to safely locate XML media attribute")
+				}
+				replacements = append(replacements, replacement)
+			}
+			if hasInferredType && !hasTypeAttribute {
+				if insertion, ok := locateAttributeInsertion(content, tokenEnd, mimeType); ok {
+					replacements = append(replacements, insertion)
+				}
+			}
+			stack = append(stack, feedElementFrame{Name: value.Name, Base: baseURL})
+		case xml.CharData:
+			resource, ok := feedTextResource(stack)
+			if !ok {
+				continue
+			}
+			start, end := int(tokenStart), int(decoder.InputOffset())
+			if start < 0 || end > len(content) || start >= end {
+				continue
+			}
+			rawText := content[start:end]
+			decoded, err := xmlUnescapeText(rawText)
+			if err != nil {
+				return nil, fmt.Errorf("invalid text URL in feed")
+			}
+			if strings.TrimSpace(decoded) == "" {
+				continue
+			}
+			elementBuilder := *builder
+			elementBuilder.sourceURL = stack[len(stack)-1].Base
+			proxyURL, err := buildFeedProxyURL(&elementBuilder, apikey, resource, strings.TrimSpace(decoded), feedCredentials...)
+			if err != nil {
+				return nil, fmt.Errorf("invalid media URL in feed")
+			}
+			if resource == ResourceImage {
+				if token := routeTokenFromProxyURL(proxyURL); token != "" {
+					if currentURL, err := resolveFeedURL(elementBuilder.sourceURL, strings.TrimSpace(decoded)); err == nil {
+						UpdateResourceRouteURL(resource, token, currentURL)
+					}
+				}
+			}
+			if resource == ResourceImage {
+				proxyURL = registerCredentialsOnMediaURL(proxyURL, feedCredentials...)
+			}
+			left := len(rawText) - len(strings.TrimLeftFunc(rawText, isXMLSpaceRune))
+			right := len(strings.TrimRightFunc(rawText, isXMLSpaceRune))
+			replacements = append(replacements, xmlReplacement{
+				start: start + left,
+				end:   start + right,
+				value: xmlEscape(proxyURL),
+			})
+		case xml.EndElement:
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
 			}
 		}
-
-		// 替换url属性值
-		urlAttrRegex := regexp.MustCompile(`(url=")([^"]+)`)
-		return urlAttrRegex.ReplaceAllStringFunc(match, func(attrMatch string) string {
-			parts := urlAttrRegex.FindStringSubmatch(attrMatch)
-			if len(parts) < 3 {
-				return attrMatch
-			}
-			return parts[1] + proxyFunc(apikey, parts[2])
-		})
-	})
+	}
+	return replacements, nil
 }
 
-// FeedValidator RSS源验证器
+func feedAttributeResource(stack []feedElementFrame, parent string, element xml.Name, attrs []xml.Attr, attr xml.Attr) (ProxyResource, bool) {
+	if attr.Name.Space != "" {
+		return "", false
+	}
+	local := element.Local
+	namespace := element.Space
+	attrName := attr.Name.Local
+	switch {
+	case local == "enclosure" && attrName == "url":
+		return ResourceAudio, true
+	case local == "link" && attrName == "href" && elementNamespaceMatches(namespace, atomNamespace) && !inElementStack(stack, "entry"):
+		for _, item := range attrs {
+			if item.Name.Space == "" && item.Name.Local == "rel" && strings.EqualFold(strings.TrimSpace(item.Value), "self") {
+				return ResourceFeed, true
+			}
+		}
+	case local == "link" && attrName == "href" && elementNamespaceMatches(namespace, atomNamespace) && inElementStack(stack, "entry"):
+		rel, mediaType := "", ""
+		for _, item := range attrs {
+			if item.Name.Space == "" && item.Name.Local == "rel" {
+				rel = item.Value
+			}
+			if item.Name.Space == "" && item.Name.Local == "type" {
+				mediaType = item.Value
+			}
+		}
+		rel = strings.ToLower(strings.TrimSpace(rel))
+		mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+		if rel == "enclosure" {
+			if strings.HasPrefix(mediaType, "audio/") || strings.HasPrefix(mediaType, "video/") {
+				return ResourceAudio, true
+			}
+			if inferredType, ok := inferredEnclosureType(element, parent, stack, attrs); ok {
+				return mediaContentResource(inferredType)
+			}
+		}
+	case local == "content" && attrName == "url" && elementNamespaceMatches(namespace, mediaRSSNamespace):
+		for _, item := range attrs {
+			if item.Name.Space == "" && item.Name.Local == "type" {
+				return mediaContentResource(item.Value)
+			}
+		}
+	case local == "thumbnail" && attrName == "url" && elementNamespaceMatches(namespace, mediaRSSNamespace):
+		return ResourceImage, true
+	case local == "image" && attrName == "href" && elementNamespaceMatches(namespace, itunesNamespace):
+		return ResourceImage, true
+	case local == "chapters" && attrName == "url" && elementNamespaceMatches(namespace, podcastNamespace):
+		return ResourceStyle, true
+	case local == "transcript" && attrName == "url" && elementNamespaceMatches(namespace, podcastNamespace):
+		return ResourceStyle, true
+	case local == "person" && attrName == "img" && elementNamespaceMatches(namespace, podcastNamespace):
+		return ResourceImage, true
+	case local == "url" && parent == "image" && attrName == "":
+		return "", false // Text content is rewritten separately.
+	}
+	return "", false
+}
+
+func feedTextResource(stack []feedElementFrame) (ProxyResource, bool) {
+	if len(stack) == 0 {
+		return "", false
+	}
+	last := stack[len(stack)-1]
+	if last.Name.Local == "url" && len(stack) >= 2 && stack[len(stack)-2].Name.Local == "image" {
+		return ResourceImage, true
+	}
+	if (last.Name.Local == "logo" || last.Name.Local == "icon") && elementNamespaceMatches(last.Name.Space, atomNamespace) {
+		return ResourceImage, true
+	}
+	if last.Name.Local == "new-feed-url" && elementNamespaceMatches(last.Name.Space, itunesNamespace) {
+		return ResourceFeed, true
+	}
+	return "", false
+}
+
+func elementNamespaceMatches(space, namespace string) bool {
+	return space == namespace
+}
+
+func inElementStack(stack []feedElementFrame, name string) bool {
+	for _, element := range stack {
+		if element.Name.Local == name {
+			return true
+		}
+	}
+	return false
+}
+
+func mediaContentResource(mimeType string) (ProxyResource, bool) {
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	if strings.HasPrefix(mimeType, "audio/") || strings.HasPrefix(mimeType, "video/") {
+		return ResourceAudio, true
+	}
+	if strings.HasPrefix(mimeType, "image/") {
+		return ResourceImage, true
+	}
+	return "", false
+}
+
+func inferredEnclosureType(element xml.Name, parent string, stack []feedElementFrame, attrs []xml.Attr) (string, bool) {
+	resourceURL := ""
+	rel := ""
+	typeValue := ""
+	for _, attr := range attrs {
+		if attr.Name.Space != "" {
+			continue
+		}
+		switch attr.Name.Local {
+		case "url":
+			if element.Local == "enclosure" {
+				resourceURL = attr.Value
+			}
+		case "href":
+			if element.Local == "link" {
+				resourceURL = attr.Value
+			}
+		case "rel":
+			rel = strings.ToLower(strings.TrimSpace(attr.Value))
+		case "type":
+			typeValue = strings.TrimSpace(attr.Value)
+		}
+	}
+	typeValue = strings.ToLower(strings.TrimSpace(typeValue))
+	if resourceURL == "" || strings.HasPrefix(typeValue, "audio/") || strings.HasPrefix(typeValue, "video/") {
+		return "", false
+	}
+	rssEnclosure := element.Local == "enclosure" && len(stack) > 0
+	atomEnclosure := element.Local == "link" && element.Space == atomNamespace && parent == "entry" && rel == "enclosure"
+	if !rssEnclosure && !atomEnclosure {
+		return "", false
+	}
+	parsed, err := url.Parse(resourceURL)
+	if err != nil {
+		return "", false
+	}
+	mediaType := mime.TypeByExtension(strings.ToLower(feedPathExtension(parsed.Path)))
+	if mediaType == "" {
+		mediaType = "audio/mpeg"
+	}
+	mediaType, _, _ = strings.Cut(mediaType, ";")
+	mediaType = strings.TrimSpace(mediaType)
+	resource, ok := mediaContentResource(mediaType)
+	return mediaType, ok && resource == ResourceAudio
+}
+
+func feedPathExtension(path string) string {
+	if slash := strings.LastIndexByte(path, '/'); slash >= 0 {
+		path = path[slash+1:]
+	}
+	if index := strings.LastIndexByte(path, '.'); index >= 0 {
+		return path[index:]
+	}
+	return ""
+}
+
+func buildFeedProxyURL(builder *ProxyURLBuilder, apikey string, resource ProxyResource, raw string, credentials ...string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", fmt.Errorf("empty resource URL")
+	}
+	absolute, err := resolveFeedURL(builder.sourceURL, raw)
+	if err != nil {
+		return "", err
+	}
+	switch resource {
+	case ResourceAudio:
+		return builder.BuildAudioURL(apikey, absolute, credentials...), nil
+	case ResourceImage:
+		return builder.BuildImageURL(apikey, absolute, credentials...), nil
+	case ResourceStyle:
+		return builder.BuildStyleURL(apikey, absolute, credentials...), nil
+	case ResourceFeed:
+		return builder.BuildFeedURLFor(apikey, absolute), nil
+	default:
+		return "", fmt.Errorf("unsupported resource type %q", resource)
+	}
+}
+
+func routeTokenFromProxyURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[1]
+}
+
+func resolveFeedURL(base, raw string) (string, error) {
+	relative, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", err
+	}
+	if relative.User != nil {
+		return "", fmt.Errorf("resource URL must not contain embedded credentials")
+	}
+	if base == "" {
+		if !relative.IsAbs() || (relative.Scheme != "http" && relative.Scheme != "https") || relative.Host == "" {
+			return "", fmt.Errorf("resource URL must be an absolute HTTP(S) URL")
+		}
+		return relative.String(), nil
+	}
+	baseURL, err := url.Parse(base)
+	if err != nil {
+		return "", err
+	}
+	resolved := baseURL.ResolveReference(relative)
+	if (resolved.Scheme != "http" && resolved.Scheme != "https") || resolved.Host == "" || resolved.User != nil {
+		return "", fmt.Errorf("resource URL did not resolve to HTTP(S)")
+	}
+	return resolved.String(), nil
+}
+
+func locateAttributeReplacement(content string, tokenEnd int64, elementName, targetName, targetValue, replacement string) (xmlReplacement, bool) {
+	start, end, ok := startTagRange(content, tokenEnd)
+	if !ok {
+		return xmlReplacement{}, false
+	}
+	pos := start + 1
+	for pos < end && !isXMLSpace(content[pos]) && content[pos] != '/' && content[pos] != '>' {
+		pos++
+	}
+	if content[start+1:pos] != elementName {
+		return xmlReplacement{}, false
+	}
+	for pos < end {
+		for pos < end && (isXMLSpace(content[pos]) || content[pos] == '/') {
+			pos++
+		}
+		if pos >= end || content[pos] == '>' {
+			break
+		}
+		nameStart := pos
+		for pos < end && !isXMLSpace(content[pos]) && content[pos] != '=' && content[pos] != '/' && content[pos] != '>' {
+			pos++
+		}
+		if nameStart == pos {
+			pos++
+			continue
+		}
+		qualifiedName := content[nameStart:pos]
+		for pos < end && isXMLSpace(content[pos]) {
+			pos++
+		}
+		if pos >= end || content[pos] != '=' {
+			continue
+		}
+		pos++
+		for pos < end && isXMLSpace(content[pos]) {
+			pos++
+		}
+		if pos >= end || (content[pos] != '\'' && content[pos] != '"') {
+			return xmlReplacement{}, false
+		}
+		quote := content[pos]
+		valueStart := pos + 1
+		valueEnd := valueStart
+		for valueEnd < end && content[valueEnd] != quote {
+			valueEnd++
+		}
+		if valueEnd >= end {
+			return xmlReplacement{}, false
+		}
+		if qualifiedName == targetName {
+			decoded, err := xmlUnescapeAttribute(content[valueStart:valueEnd])
+			if err == nil && decoded == targetValue {
+				return xmlReplacement{start: valueStart, end: valueEnd, value: xmlEscape(replacement)}, true
+			}
+		}
+		pos = valueEnd + 1
+	}
+	return xmlReplacement{}, false
+}
+
+func locateAttributeInsertion(content string, tokenEnd int64, mimeType string) (xmlReplacement, bool) {
+	start, end, ok := startTagRange(content, tokenEnd)
+	if !ok || end <= start+1 {
+		return xmlReplacement{}, false
+	}
+	insertAt := end - 1
+	for insertAt > start && isXMLSpace(content[insertAt-1]) {
+		insertAt--
+	}
+	if insertAt > start && content[insertAt-1] == '/' {
+		insertAt--
+	}
+	return xmlReplacement{start: insertAt, end: insertAt, value: ` type="` + xmlEscape(mimeType) + `"`}, true
+}
+
+func qualifiedElementName(content string, tokenEnd int64) string {
+	start, end, ok := startTagRange(content, tokenEnd)
+	if !ok || start+1 >= end {
+		return ""
+	}
+	pos := start + 1
+	for pos < end && !isXMLSpace(content[pos]) && content[pos] != '/' && content[pos] != '>' {
+		pos++
+	}
+	return content[start+1 : pos]
+}
+
+func startTagRange(content string, tokenEnd int64) (int, int, bool) {
+	end := int(tokenEnd)
+	if end > len(content) || end < 0 {
+		return 0, 0, false
+	}
+	start := strings.LastIndex(content[:end], "<")
+	if start < 0 {
+		return 0, 0, false
+	}
+	quote := byte(0)
+	for i := start + 1; i < end; i++ {
+		c := content[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quote = c
+		} else if c == '>' {
+			return start, i + 1, true
+		}
+	}
+	return 0, 0, false
+}
+
+func xmlUnescapeAttribute(raw string) (string, error) {
+	decoder := newXMLDecoder("<value attr=\"" + strings.ReplaceAll(raw, "\"", "&quot;") + "\"/>")
+	var result struct {
+		Value string `xml:"attr,attr"`
+	}
+	if err := decoder.Decode(&result); err != nil {
+		return "", err
+	}
+	return result.Value, nil
+}
+
+func xmlUnescapeText(raw string) (string, error) {
+	decoder := newXMLDecoder("<value>" + raw + "</value>")
+	var result struct {
+		Value string `xml:",chardata"`
+	}
+	if err := decoder.Decode(&result); err != nil {
+		return "", err
+	}
+	return result.Value, nil
+}
+
+func isXMLSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
+}
+
+func isXMLSpaceRune(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\r' || r == '\n'
+}
+
+func applyXMLReplacements(content string, replacements []xmlReplacement) (string, error) {
+	if len(replacements) == 0 {
+		return content, nil
+	}
+	for i := 1; i < len(replacements); i++ {
+		if replacements[i-1].end > replacements[i].start {
+			return "", fmt.Errorf("overlapping XML replacements")
+		}
+	}
+	var out strings.Builder
+	out.Grow(len(content) + len(replacements)*64)
+	last := 0
+	for _, replacement := range replacements {
+		if replacement.start < last || replacement.end > len(content) {
+			return "", fmt.Errorf("invalid XML replacement range")
+		}
+		out.WriteString(content[last:replacement.start])
+		out.WriteString(replacement.value)
+		last = replacement.end
+	}
+	out.WriteString(content[last:])
+	return out.String(), nil
+}
+
+func stripFeedStylesheets(content string) (string, error) {
+	decoder := newXMLDecoder(content)
+	decoder.Strict = true
+	var ranges [][2]int
+	for {
+		before := decoder.InputOffset()
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		instruction, ok := token.(xml.ProcInst)
+		if !ok || !strings.EqualFold(instruction.Target, "xml-stylesheet") {
+			continue
+		}
+		start, end := int(before), int(decoder.InputOffset())
+		if start < 0 || end < start || end > len(content) {
+			return "", fmt.Errorf("invalid stylesheet processing instruction range")
+		}
+		if start == 0 && strings.HasPrefix(content, "\ufeff") {
+			return "", fmt.Errorf("stylesheet processing instruction precedes XML BOM")
+		}
+		ranges = append(ranges, [2]int{start, end})
+	}
+	for i := len(ranges) - 1; i >= 0; i-- {
+		content = content[:ranges[i][0]] + content[ranges[i][1]:]
+	}
+	return content, nil
+}
+
+// FeedValidator validates HTTP(S) feed URLs and well-formed RSS/Atom XML.
 type FeedValidator struct{}
 
-// ValidateFeedURL 验证RSS源URL
 func (*FeedValidator) ValidateFeedURL(feedURL string) bool {
-	if feedURL == "" {
-		return false
-	}
-	
-	// 基本URL格式检查
-	if !strings.HasPrefix(feedURL, "http://") && !strings.HasPrefix(feedURL, "https://") {
-		return false
-	}
-	
-	return true
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(feedURL))
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" && parsed.User == nil
 }
 
-// IsFeedContent 判断是否是有效的RSS/Atom内容
 func (*FeedValidator) IsFeedContent(content string) bool {
-	lower := strings.ToLower(content)
-	
-	// 检查是否包含RSS或Atom标记
-	return strings.Contains(lower, "<rss") || 
-	       strings.Contains(lower, "<feed") ||
-	       strings.Contains(lower, "<?xml")
+	decoder := newXMLDecoder(content)
+	decoder.Strict = true
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return false
+		}
+		if err != nil {
+			return false
+		}
+		if root, ok := token.(xml.StartElement); ok {
+			return root.Name.Local == "rss" || root.Name.Local == "feed" || root.Name.Local == "RDF"
+		}
+	}
 }
 
-// ValidateTransformedFeed 验证转换后的RSS是否是有效的XML
-// 这确保了转换不会破坏RSS的XML结构
 func (*FeedValidator) ValidateTransformedFeed(content string) error {
-	// 尝试将内容解析为XML
-	decoder := xml.NewDecoder(strings.NewReader(content))
-	decoder.Strict = false // 允许某些非标准的XML
-	
+	decoder := newXMLDecoder(content)
+	decoder.Strict = true
 	for {
-		t, err := decoder.Token()
-		if err != nil {
-			if err.Error() == "EOF" {
-				return nil // 解析成功
+		if _, err := decoder.Token(); err != nil {
+			if err == io.EOF {
+				return nil
 			}
 			return err
 		}
-		if t == nil {
-			break
-		}
 	}
-	return nil
 }
 
-
+func newXMLDecoder(content string) *xml.Decoder {
+	decoder := xml.NewDecoder(strings.NewReader(content))
+	decoder.CharsetReader = newCharsetReader
+	return decoder
+}

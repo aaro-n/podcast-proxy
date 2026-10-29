@@ -5,22 +5,25 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 )
 
 // ProxyURLBuilder URL构建器
 type ProxyURLBuilder struct {
-	scheme string
-	host   string
+	scheme    string
+	host      string
+	sourceURL string
 }
 
 // NewProxyURLBuilder 创建URL构建器
-func NewProxyURLBuilder(r *http.Request) *ProxyURLBuilder {
+func NewProxyURLBuilder(r *http.Request, sourceURL ...string) *ProxyURLBuilder {
 	builder := &ProxyURLBuilder{
 		scheme: "http",
-		host:   r.Host,
+		host:   "",
+	}
+	if len(sourceURL) > 0 {
+		builder.sourceURL = sourceURL[0]
 	}
 
 	// 判断是否使用HTTPS
@@ -29,35 +32,70 @@ func NewProxyURLBuilder(r *http.Request) *ProxyURLBuilder {
 	}
 
 	// 使用PUBLIC_HOST覆盖
-	if publicHost := os.Getenv("PUBLIC_HOST"); publicHost != "" {
-		builder.host = publicHost
+	if GetConfig().PublicHost != "" {
+		builder.host = GetConfig().PublicHost
+	}
+	if r.TLS != nil {
+		builder.scheme = "https"
+	}
+	if GetConfig().TrustProxyHeaders {
+		if proto := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])); proto == "https" {
+			builder.scheme = "https"
+		}
 	}
 
 	return builder
 }
 
 // BuildAudioURL 构建音频代理URL
-func (b *ProxyURLBuilder) BuildAudioURL(apikey, originalURL string) string {
-	return b.buildURL("audio", apikey, originalURL)
+func (b *ProxyURLBuilder) BuildAudioURL(apikey, originalURL string, credentials ...string) string {
+	return b.buildURL("audio", apikey, originalURL, credentials...)
 }
 
 // BuildImageURL 构建图片代理URL
-func (b *ProxyURLBuilder) BuildImageURL(apikey, originalURL string) string {
-	return b.buildURL("image", apikey, originalURL)
+func (b *ProxyURLBuilder) BuildImageURL(apikey, originalURL string, credentials ...string) string {
+	return b.buildURL("image", apikey, originalURL, credentials...)
 }
 
 // BuildStyleURL 构建样式代理URL
-func (b *ProxyURLBuilder) BuildStyleURL(apikey, originalURL string) string {
-	return b.buildURL("style", apikey, originalURL)
+func (b *ProxyURLBuilder) BuildStyleURL(apikey, originalURL string, credentials ...string) string {
+	return b.buildURL("style", apikey, originalURL, credentials...)
+}
+
+// BuildFeedXSLURL is retained for legacy integrations; native feed presentation
+// no longer adds an XSLT processing instruction to RSS/Atom responses.
+func (b *ProxyURLBuilder) BuildFeedXSLURL(apikey string) string {
+	token := NewAuthManager().SignFeedURL(b.sourceURL)
+	return fmt.Sprintf("%s://%s/podcast.xsl/%s?url=%s", b.scheme, b.host, token, url.QueryEscape(b.sourceURL))
+}
+
+// BuildFeedURL returns a scoped feed URL suitable for entering directly into PinePods.
+func (b *ProxyURLBuilder) BuildFeedURL(apikey string) string {
+	return b.BuildFeedURLFor(apikey, b.sourceURL)
+}
+
+func (b *ProxyURLBuilder) BuildFeedURLFor(apikey, feedURL string) string {
+	token := NewAuthManager().SignScopedFeedURL(feedURL)
+	username, password := LookupFeedCredentials(b.sourceURL)
+	if username != "" || password != "" {
+		RegisterFeedCredentials(feedURL, username, password)
+	}
+	return fmt.Sprintf("%s://%s/feed?url=%s&feed_token=%s", b.scheme, b.host, url.QueryEscape(feedURL), token)
+}
+
+// BuildAbsoluteFeedURL is used by browser-facing XML processing instructions.
+func (b *ProxyURLBuilder) BuildAbsoluteFeedURL(apikey string) string {
+	return b.BuildFeedURL(apikey)
 }
 
 // buildURL 内部构建代理URL，带有虚拟文件名和原生后缀，以通过各大播客客户端和校验器的严格检测
-func (b *ProxyURLBuilder) buildURL(resourceType, apikey, originalURL string) string {
+func (b *ProxyURLBuilder) buildURL(resourceType, apikey, originalURL string, credentials ...string) string {
 	// RSS 属性里原始 URL 常带 &amp;，先还原为 & 再 QueryEscape，
 	// 否则会产生 %26amp%3B 二次编码，严格播放器可能校验失败。
 	originalURL = strings.ReplaceAll(originalURL, "&amp;", "&")
-	auth := NewAuthManager()
-	encodedKey := auth.EncodeKey(apikey)
+	resource := ProxyResource(resourceType)
+	token := NewAuthManager().SignResource(resource, originalURL)
+	RegisterResourceRoute(resource, token, originalURL, credentials...)
 
 	// 根据资源类型和原始URL猜测文件后缀，从而在路径中追加虚拟文件名
 	virtualFile := "file"
@@ -100,13 +138,12 @@ func (b *ProxyURLBuilder) buildURL(resourceType, apikey, originalURL string) str
 		b.scheme,
 		b.host,
 		resourceType,
-		url.PathEscape(encodedKey),
+		token,
 		virtualFile,
 		url.QueryEscape(originalURL),
 	)
 
-	// XML属性转义
-	return xmlEscape(raw)
+	return raw
 }
 
 // xmlEscape XML属性值转义
@@ -117,6 +154,32 @@ func xmlEscape(s string) string {
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
 	return s
+}
+
+func registerCredentialsOnMediaURL(proxyURL string, credentials ...string) string {
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		return proxyURL
+	}
+	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
+	if len(parts) < 2 {
+		return proxyURL
+	}
+	resource := ProxyResource(parts[0])
+	username, password := "", ""
+	if len(credentials) > 0 {
+		username = credentials[0]
+	}
+	if len(credentials) > 1 {
+		password = credentials[1]
+	}
+	RegisterResourceCredentials(resource, parts[1], username, password)
+	return proxyURL
+}
+
+// SourceURL returns the feed address used to resolve relative media links.
+func (b *ProxyURLBuilder) SourceURL() string {
+	return b.sourceURL
 }
 
 // HeaderCopier 响应头复制器
@@ -181,10 +244,21 @@ func NewLoggerHelper(r *http.Request) *LoggerHelper {
 // query 里含有 apikey 和源站地址，写进日志后会长期留在磁盘上，
 // 既浪费空间，也容易在贴日志排查问题时意外泄露凭据。
 func sanitizeLogPath(u *url.URL) string {
-	if u.RawQuery == "" {
-		return u.Path
+	path := u.Path
+	parts := strings.Split(path, "/")
+	if len(parts) > 2 {
+		switch parts[1] {
+		case "audio", "image", "style", "podcast.xsl":
+			if parts[2] != "" {
+				parts[2] = "<redacted>"
+			}
+		}
 	}
-	return u.Path + "?<redacted>"
+	path = strings.Join(parts, "/")
+	if u.RawQuery != "" {
+		return path + "?<redacted>"
+	}
+	return path
 }
 
 // LogStart 记录请求开始
@@ -217,20 +291,8 @@ func RejectRequest(w http.ResponseWriter) {
 
 // getRemoteAddr 获取客户端IP
 func getRemoteAddr(r *http.Request) string {
-	// 1. 尝试获取X-Forwarded-For（代理情况）
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		ips := strings.Split(xff, ",")
-		if len(ips) > 0 {
-			return strings.TrimSpace(ips[0])
-		}
-	}
-
-	// 2. 尝试获取X-Real-IP
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
-	}
-
-	// 3. 从RemoteAddr提取（移除端口）
+	// Forwarded client IP headers are spoofable unless the request came through a
+	// trusted reverse proxy. Log the socket peer instead of trusting user input.
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host
 	}

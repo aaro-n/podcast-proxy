@@ -31,6 +31,8 @@ func TestCheckEgressIP(t *testing.T) {
 		// 显式允许内网：仅放行私网，元数据/回环仍拦截
 		{"192.168.1.1", true, true},
 		{"10.0.0.1", true, true},
+		{"fd00::1", true, true},
+		{"100.64.0.1", true, false}, // CGNAT remains blocked even in private-network mode
 		{"169.254.169.254", true, false},
 		{"127.0.0.1", true, false},
 	}

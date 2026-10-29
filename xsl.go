@@ -8,6 +8,7 @@ func GetXSLTemplate() string {
     xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
     xmlns:content="http://purl.org/rss/1.0/modules/content/"
     xmlns:atom="http://www.w3.org/2005/Atom"
+    xmlns:proxy="urn:podcast-proxy"
     exclude-result-prefixes="itunes content atom">
     
     <xsl:output method="html" encoding="utf-8" indent="yes" />
@@ -17,7 +18,7 @@ func GetXSLTemplate() string {
             <head>
                 <meta charset="utf-8" />
                 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-                <title><xsl:value-of select="rss/channel/title"/> - Podcast Proxy</title>
+                <title><xsl:value-of select="rss/channel/title | proxy:feed/rss/channel/title"/> - Podcast Proxy</title>
                 <link href="https://lib.baomitu.com/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet" />
                 <link rel="stylesheet" href="https://lib.baomitu.com/font-awesome/6.4.0/css/all.min.css" />
                 <style>
@@ -85,11 +86,11 @@ func GetXSLTemplate() string {
                 <div class="fixed inset-0 z-0 overflow-hidden pointer-events-none opacity-20">
                     <div class="absolute inset-0 bg-cover bg-center filter blur-3xl scale-110" id="bg-layer">
                         <xsl:choose>
-                            <xsl:when test="rss/channel/itunes:image/@href">
-                                <xsl:attribute name="style">background-image: url('<xsl:value-of select="rss/channel/itunes:image/@href"/>');</xsl:attribute>
+                            <xsl:when test="rss/channel/itunes:image/@href | proxy:feed/rss/channel/itunes:image/@href">
+                                <xsl:attribute name="style">background-image: url('<xsl:value-of select="rss/channel/itunes:image/@href | proxy:feed/rss/channel/itunes:image/@href"/>');</xsl:attribute>
                             </xsl:when>
-                            <xsl:when test="rss/channel/image/url">
-                                <xsl:attribute name="style">background-image: url('<xsl:value-of select="rss/channel/image/url"/>');</xsl:attribute>
+                            <xsl:when test="rss/channel/image/url | proxy:feed/rss/channel/image/url">
+                                <xsl:attribute name="style">background-image: url('<xsl:value-of select="rss/channel/image/url | proxy:feed/rss/channel/image/url"/>');</xsl:attribute>
                             </xsl:when>
                         </xsl:choose>
                     </div>
@@ -108,8 +109,8 @@ func GetXSLTemplate() string {
                                     <img class="w-full h-full object-cover" alt="Podcast Cover">
                                         <xsl:attribute name="src">
                                             <xsl:choose>
-                                                <xsl:when test="rss/channel/itunes:image/@href"><xsl:value-of select="rss/channel/itunes:image/@href"/></xsl:when>
-                                                <xsl:when test="rss/channel/image/url"><xsl:value-of select="rss/channel/image/url"/></xsl:when>
+                                                <xsl:when test="rss/channel/itunes:image/@href | proxy:feed/rss/channel/itunes:image/@href"><xsl:value-of select="rss/channel/itunes:image/@href | proxy:feed/rss/channel/itunes:image/@href"/></xsl:when>
+                                                <xsl:when test="rss/channel/image/url | proxy:feed/rss/channel/image/url"><xsl:value-of select="rss/channel/image/url | proxy:feed/rss/channel/image/url"/></xsl:when>
                                                 <xsl:otherwise>https://cdn.bootcdn.net/ajax/libs/font-awesome/6.4.0/svgs/solid/microphone.svg</xsl:otherwise>
                                             </xsl:choose>
                                         </xsl:attribute>
@@ -118,26 +119,26 @@ func GetXSLTemplate() string {
                                 
                                 <!-- 标题与作者 -->
                                 <h1 class="text-2xl font-extrabold text-white tracking-tight mb-2">
-                                    <xsl:value-of select="rss/channel/title"/>
+                                    <xsl:value-of select="rss/channel/title | proxy:feed/rss/channel/title"/>
                                 </h1>
                                 <p class="text-blue-400 font-medium text-sm mb-4">
                                     <xsl:choose>
-                                        <xsl:when test="rss/channel/itunes:author"><xsl:value-of select="rss/channel/itunes:author"/></xsl:when>
-                                        <xsl:when test="rss/channel/itunes:owner/itunes:name"><xsl:value-of select="rss/channel/itunes:owner/itunes:name"/></xsl:when>
+                                        <xsl:when test="rss/channel/itunes:author | proxy:feed/rss/channel/itunes:author"><xsl:value-of select="rss/channel/itunes:author | proxy:feed/rss/channel/itunes:author"/></xsl:when>
+                                        <xsl:when test="rss/channel/itunes:owner/itunes:name | proxy:feed/rss/channel/itunes:owner/itunes:name"><xsl:value-of select="rss/channel/itunes:owner/itunes:name | proxy:feed/rss/channel/itunes:owner/itunes:name"/></xsl:when>
                                         <xsl:otherwise>未知作者</xsl:otherwise>
                                     </xsl:choose>
                                 </p>
 
                                 <!-- 分类与语言 -->
                                 <div class="flex flex-wrap justify-center gap-2 mb-6">
-                                    <xsl:if test="rss/channel/itunes:category/@text">
+                                    <xsl:if test="rss/channel/itunes:category/@text | proxy:feed/rss/channel/itunes:category/@text">
                                         <span class="px-3 py-1 bg-slate-800 text-slate-300 text-xs font-semibold rounded-full border border-slate-700">
-                                            <xsl:value-of select="rss/channel/itunes:category/@text"/>
+                                            <xsl:value-of select="rss/channel/itunes:category/@text | proxy:feed/rss/channel/itunes:category/@text"/>
                                         </span>
                                     </xsl:if>
-                                    <xsl:if test="rss/channel/language">
+                                    <xsl:if test="rss/channel/language | proxy:feed/rss/channel/language">
                                         <span class="px-3 py-1 bg-slate-800 text-slate-300 text-xs font-semibold rounded-full border border-slate-700 uppercase">
-                                            <xsl:value-of select="rss/channel/language"/>
+                                            <xsl:value-of select="rss/channel/language | proxy:feed/rss/channel/language"/>
                                         </span>
                                     </xsl:if>
                                     <span class="px-3 py-1 bg-blue-900/40 text-blue-300 text-xs font-semibold rounded-full border border-blue-800/50">
@@ -148,17 +149,18 @@ func GetXSLTemplate() string {
                                 <!-- 播客简介 -->
                                 <div class="text-slate-300 text-sm leading-relaxed text-left w-full border-t border-slate-800 pt-4 mb-6 max-h-48 overflow-y-auto custom-scrollbar">
                                     <xsl:choose>
-                                        <xsl:when test="rss/channel/itunes:summary">
-                                            <xsl:value-of select="rss/channel/itunes:summary"/>
+                                        <xsl:when test="rss/channel/itunes:summary | proxy:feed/rss/channel/itunes:summary">
+                                            <xsl:value-of select="rss/channel/itunes:summary | proxy:feed/rss/channel/itunes:summary"/>
                                         </xsl:when>
                                         <xsl:otherwise>
-                                            <xsl:value-of select="rss/channel/description" disable-output-escaping="yes"/>
+                                            <xsl:value-of select="rss/channel/description | proxy:feed/rss/channel/description"/>
                                         </xsl:otherwise>
                                     </xsl:choose>
                                 </div>
 
                                 <!-- 复制RSS链接 -->
                                 <button onclick="copyRSSUrl()" class="w-full py-3 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold rounded-xl shadow-lg transition duration-200 transform hover:scale-[1.02] flex items-center justify-center gap-2">
+                                    <xsl:attribute name="data-rss-url"><xsl:value-of select="proxy:feed/proxy:source"/></xsl:attribute>
                                     <i class="fa-solid fa-square-rss"></i> 复制代理 RSS 链接
                                 </button>
                                 <p class="text-slate-400 text-xs mt-3">
@@ -174,7 +176,7 @@ func GetXSLTemplate() string {
                             <div class="glass rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-lg">
                                 <div class="text-sm text-slate-300 flex items-center gap-2 font-medium">
                                     <i class="fa-solid fa-microphone-lines text-blue-400 text-lg"></i>
-                                    共计 <span id="episode-count" class="text-white font-extrabold text-base"><xsl:value-of select="count(rss/channel/item)"/></span> 期节目
+                                    共计 <span id="episode-count" class="text-white font-extrabold text-base"><xsl:value-of select="count(rss/channel/item | proxy:feed/rss/channel/item)"/></span> 期节目
                                 </div>
                                 <div class="relative w-full sm:w-64">
                                     <span class="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-slate-400">
@@ -186,7 +188,7 @@ func GetXSLTemplate() string {
 
                             <!-- 单集卡片 -->
                             <div class="flex flex-col gap-4" id="episode-list">
-                                <xsl:for-each select="rss/channel/item">
+                                <xsl:for-each select="rss/channel/item | proxy:feed/rss/channel/item">
                                     <div class="glass glass-hover rounded-2xl p-6 shadow-md flex flex-col gap-4 episode-card" data-title="{title}" data-desc="{description}">
                                         
                                         <!-- 发布时间、时长 -->
@@ -210,10 +212,10 @@ func GetXSLTemplate() string {
                                         <div class="rich-content text-slate-300 text-sm leading-relaxed max-h-24 overflow-hidden relative transition-all duration-300 desc-container">
                                             <xsl:choose>
                                                 <xsl:when test="content:encoded">
-                                                    <xsl:value-of select="content:encoded" disable-output-escaping="yes"/>
+                                                    <xsl:value-of select="content:encoded"/>
                                                 </xsl:when>
                                                 <xsl:otherwise>
-                                                    <xsl:value-of select="description" disable-output-escaping="yes"/>
+                                                    <xsl:value-of select="description"/>
                                                 </xsl:otherwise>
                                             </xsl:choose>
                                             
@@ -260,7 +262,7 @@ func GetXSLTemplate() string {
                             <div id="player-title" class="text-white font-bold text-sm truncate">单集标题</div>
                             <div id="player-author" class="text-slate-400 text-xs mt-0.5 truncate">
                                 <xsl:choose>
-                                    <xsl:when test="rss/channel/title"><xsl:value-of select="rss/channel/title"/></xsl:when>
+                                        <xsl:when test="rss/channel/title | proxy:feed/rss/channel/title"><xsl:value-of select="rss/channel/title | proxy:feed/rss/channel/title"/></xsl:when>
                                     <xsl:otherwise>播客节目</xsl:otherwise>
                                 </xsl:choose>
                             </div>
@@ -295,7 +297,7 @@ func GetXSLTemplate() string {
                     });
 
                     function copyRSSUrl() {
-                        const currentUrl = window.location.href;
+                        const currentUrl = document.querySelector("[data-rss-url]")?.getAttribute("data-rss-url") || window.location.href;
                         navigator.clipboard.writeText(currentUrl).then(() => {
                             alert("已复制代理 RSS 链接到剪贴板！\n" + currentUrl);
                         }).catch(err => {

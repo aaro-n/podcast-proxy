@@ -1,8 +1,12 @@
 package main
 
 import (
+	"compress/gzip"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,7 +23,10 @@ type HTTPClientManager struct {
 func (hm *HTTPClientManager) init(timeout time.Duration) {
 	hm.mu.Lock()
 	defer hm.mu.Unlock()
+	hm.initLocked(timeout)
+}
 
+func (hm *HTTPClientManager) initLocked(timeout time.Duration) {
 	transport := &http.Transport{
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 100,
@@ -27,7 +34,7 @@ func (hm *HTTPClientManager) init(timeout time.Duration) {
 		// 出站守卫：DNS 解析后的 IP 校验 + 端口白名单，每跳重定向都会经过
 		DialContext: egressDialContext,
 		// 支持Range请求
-		DisableCompression: false,
+		DisableCompression: true,
 	}
 
 	if hm.client == nil {
@@ -36,6 +43,12 @@ func (hm *HTTPClientManager) init(timeout time.Duration) {
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				// 限制重定向次数，防止无限循环
 				if len(via) > 10 {
+					return http.ErrUseLastResponse
+				}
+				if !validResourceURL(req.URL.String()) {
+					return http.ErrUseLastResponse
+				}
+				if req.URL.User != nil {
 					return http.ErrUseLastResponse
 				}
 				return nil
@@ -75,6 +88,12 @@ func (hm *HTTPClientManager) init(timeout time.Duration) {
 				if len(via) > 10 {
 					return http.ErrUseLastResponse
 				}
+				if !validResourceURL(req.URL.String()) {
+					return http.ErrUseLastResponse
+				}
+				if req.URL.User != nil {
+					return http.ErrUseLastResponse
+				}
 				return nil
 			},
 			Transport: mediaTransport,
@@ -88,7 +107,7 @@ func (hm *HTTPClientManager) GetClient() *http.Client {
 	defer hm.mu.Unlock()
 
 	if hm.client == nil {
-		hm.init(time.Duration(GetConfig().Timeout) * time.Second)
+		hm.initLocked(time.Duration(GetConfig().Timeout) * time.Second)
 	}
 
 	return hm.client
@@ -100,7 +119,7 @@ func (hm *HTTPClientManager) GetNoRedirectClient() *http.Client {
 	defer hm.mu.Unlock()
 
 	if hm.noRedirectClient == nil {
-		hm.init(time.Duration(GetConfig().Timeout) * time.Second)
+		hm.initLocked(time.Duration(GetConfig().Timeout) * time.Second)
 	}
 
 	return hm.noRedirectClient
@@ -112,7 +131,7 @@ func (hm *HTTPClientManager) GetAudioClient() *http.Client {
 	defer hm.mu.Unlock()
 
 	if hm.audioClient == nil {
-		hm.init(time.Duration(GetConfig().Timeout) * time.Second)
+		hm.initLocked(time.Duration(GetConfig().Timeout) * time.Second)
 	}
 
 	return hm.audioClient
@@ -150,8 +169,15 @@ func NewProxyRequest(originalURL string, resourceType string) *ProxyRequest {
 // Go 的 Client 在跟随跳转时会自动复制原始请求头（Range 等得以保留），无需人工等待 30ms。
 func (pr *ProxyRequest) Do(sourceReq *http.Request) (*http.Response, error) {
 	method := sourceReq.Method
-	if method != "HEAD" {
-		method = "GET"
+	if method != http.MethodGet && method != http.MethodHead {
+		return nil, fmt.Errorf("method %s is not supported", method)
+	}
+	if !validResourceURL(pr.originalURL) {
+		return nil, fmt.Errorf("destination URL must use HTTP or HTTPS")
+	}
+	parsedURL, parseErr := url.Parse(pr.originalURL)
+	if parseErr != nil || parsedURL.User != nil {
+		return nil, fmt.Errorf("destination URL must not contain embedded credentials")
 	}
 	// 绑定客户端请求的 Context：客户端断开（拖动进度条、关闭播放器、跳过一集）时
 	// 立即取消上游请求，避免继续下载已经没人要的音频而白白消耗带宽。
@@ -161,12 +187,23 @@ func (pr *ProxyRequest) Do(sourceReq *http.Request) (*http.Response, error) {
 	}
 
 	// 复制关键请求头
-	req.Header.Set("User-Agent", "PodcastProxy/2.0")
+	if sourceReq.Header.Get("User-Agent") != "" {
+		req.Header.Set("User-Agent", sourceReq.Header.Get("User-Agent"))
+	} else {
+		req.Header.Set("User-Agent", "PinePods/1.0 PodcastProxy/2.1")
+	}
 	req.Header.Set("Accept", "*/*")
+	if acceptLanguage := sourceReq.Header.Get("Accept-Language"); acceptLanguage != "" {
+		req.Header.Set("Accept-Language", acceptLanguage)
+	}
+	if pr.resourceType == string(ResourceFeed) {
+		req.Header.Set("Accept-Encoding", "gzip, identity;q=0.5")
+	}
 
 	// 转发Range请求头（用于音频快速跳转 / ExoPlayer、AVPlayer 探测时长）
 	if rangeHeader := sourceReq.Header.Get("Range"); rangeHeader != "" {
 		req.Header.Set("Range", rangeHeader)
+		req.Header.Set("Accept-Encoding", "identity")
 	}
 
 	// 转发 If-Range（带 ETag/时间的 Range 续传校验，缺了会导致源站回 200 而非 206）
@@ -174,17 +211,54 @@ func (pr *ProxyRequest) Do(sourceReq *http.Request) (*http.Response, error) {
 		req.Header.Set("If-Range", ifRange)
 	}
 
-	// 转发If-None-Match（用于ETag缓存）
+	// Entity validators are forwarded from this request. FeedHandler removes the
+	// client's transformed-feed validators and adds only validators bound to its
+	// cached origin representation; media validators are the origin's own
+	// pass-through ETag/Last-Modified values.
 	if ifNoneMatch := sourceReq.Header.Get("If-None-Match"); ifNoneMatch != "" {
 		req.Header.Set("If-None-Match", ifNoneMatch)
 	}
-
-	// 转发If-Modified-Since
 	if ifModifiedSince := sourceReq.Header.Get("If-Modified-Since"); ifModifiedSince != "" {
 		req.Header.Set("If-Modified-Since", ifModifiedSince)
 	}
+	resp, err := pr.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if pr.resourceType != string(ResourceFeed) {
+		return resp, nil
+	}
+	encoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	if encoding == "" || encoding == "identity" {
+		return resp, nil
+	}
+	if strings.Contains(encoding, ",") || encoding != "gzip" {
+		resp.Body.Close()
+		return nil, fmt.Errorf("unsupported feed content encoding %q", encoding)
+	}
+	reader, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		resp.Body.Close()
+		return nil, fmt.Errorf("decode upstream gzip feed: %w", err)
+	}
+	resp.Body = &gzipResponseBody{Reader: reader, source: resp.Body}
+	resp.Header.Del("Content-Encoding")
+	resp.Header.Del("Content-Length")
+	return resp, nil
+}
 
-	return pr.client.Do(req)
+type gzipResponseBody struct {
+	*gzip.Reader
+	source io.Closer
+}
+
+func (body *gzipResponseBody) Close() error {
+	readerErr := body.Reader.Close()
+	sourceErr := body.source.Close()
+	if readerErr != nil {
+		return readerErr
+	}
+	return sourceErr
 }
 
 // ProxyResponse 代理响应助手
@@ -207,6 +281,9 @@ func NewProxyResponse(sourceResp *http.Response, resourceType string) *ProxyResp
 func (pr *ProxyResponse) WriteResponse(w http.ResponseWriter, srcReq *http.Request,
 	builder *ProxyURLBuilder) error {
 	defer pr.sourceResp.Body.Close()
+	if srcReq.Method != http.MethodGet && srcReq.Method != http.MethodHead {
+		return fmt.Errorf("method %s is not supported", srcReq.Method)
+	}
 
 	// 复制响应头（排除不适合的头）
 	// 注意：不排除 Content-Length，因为 206 Partial Content 响应中
@@ -215,17 +292,17 @@ func (pr *ProxyResponse) WriteResponse(w http.ResponseWriter, srcReq *http.Reque
 	hc.CopyExcept([]string{
 		"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
 		"Te", "Trailers", "Transfer-Encoding", "Upgrade",
-		"Content-Encoding",
 	})
 
 	// 兜底 Content-Type/Accept-Ranges：部分源站省略这些头会导致客户端解析失败
 	//（音频拿不到时长/不可 seek，图片无法渲染）。补上后双端可正确识别。
 	if pr.resourceType == string(ResourceAudio) {
-		if w.Header().Get("Accept-Ranges") == "" {
+		if w.Header().Get("Accept-Ranges") == "" &&
+			(pr.sourceResp.StatusCode == http.StatusPartialContent || strings.Contains(strings.ToLower(pr.sourceResp.Header.Get("Accept-Ranges")), "bytes")) {
 			w.Header().Set("Accept-Ranges", "bytes")
 		}
 		if w.Header().Get("Content-Type") == "" {
-			w.Header().Set("Content-Type", "audio/mpeg")
+			w.Header().Set("Content-Type", "application/octet-stream")
 		}
 	} else if pr.resourceType == string(ResourceImage) {
 		if w.Header().Get("Content-Type") == "" {
@@ -236,6 +313,17 @@ func (pr *ProxyResponse) WriteResponse(w http.ResponseWriter, srcReq *http.Reque
 			w.Header().Set("Content-Type", "text/css; charset=utf-8")
 		}
 	}
+	if pr.sourceResp.StatusCode >= 300 && pr.sourceResp.StatusCode < 400 {
+		// The client follows at most ten redirects. Do not leak an upstream URL
+		// (which may contain credentials) or let it bypass this proxy.
+		w.Header().Del("Location")
+		http.Error(w, "upstream redirect limit exceeded", http.StatusBadGateway)
+		return nil
+	}
+	if pr.sourceResp.StatusCode == http.StatusPartialContent && w.Header().Get("Content-Range") == "" {
+		http.Error(w, "upstream returned an incomplete range response", http.StatusBadGateway)
+		return nil
+	}
 
 	// 设置状态码（最终状态：200/206 直接透流，不再抛 302 给客户端）
 	w.WriteHeader(pr.sourceResp.StatusCode)
@@ -245,12 +333,7 @@ func (pr *ProxyResponse) WriteResponse(w http.ResponseWriter, srcReq *http.Reque
 		return nil
 	}
 
-	// ⭐️ 创新性能优化：BDP 跨国传输高吞吐缓冲区扩容
-	// Go 语言默认的 io.Copy 内部使用 32KB 缓冲区。
-	// 对于高时延、高丢包率的跨国 TCP 链路，32KB 缓冲区会因为 TCP 滑动窗口饱合而频繁停顿，导致严重的吞吐受限。
-	// 我们将缓冲区扩容到 512KB (512 * 1024 Bytes)，以高吞吐和更少的系统调用瞬间传输大块音频，使跨国代理速度直接提升 3-5 倍！
-	buf := make([]byte, 512*1024)
-	_, err := io.CopyBuffer(w, pr.sourceResp.Body, buf)
+	_, err := io.Copy(w, pr.sourceResp.Body)
 	return err
 }
 
